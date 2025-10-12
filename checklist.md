@@ -1,7 +1,7 @@
 # MVE Implementation Checklist (from Overview.md:142-146)
 
 ## Stack Setup
-- [ ] PyTorch with AMP (automatic mixed precision)
+- [x] PyTorch with AMP (automatic mixed precision)
 - [ ] torch.checkpoint for activation recomputation
 - [ ] NetworkX for graph structure
 - [ ] FAISS for approximate nearest neighbor (optional for Phase 1)
@@ -20,7 +20,7 @@
 
 ## Training Config
 - [ ] TBPTT = 256 steps
-- [ ] Micro-batching (batch size = ?)
+- [x] Micro-batching (batch size configurable via --batch-size)
 - [x] Gradient clipping (threshold = 1.0)
 - [ ] Activation recomputation enabled
 - [x] Logging hooks for hop traces (ExperimentLogger)
