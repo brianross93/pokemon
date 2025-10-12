@@ -8,21 +8,24 @@
 - [ ] SQLite for persistent graph storage (optional for Phase 1)
 
 ## Parameter Budget (MUST match across all models)
-- [ ] SR-FBAM: 1M params
-  - [ ] Frame Head: ~300K
-  - [ ] Integrator (LSTM+MLP): ~500K
-  - [ ] Embeddings: ~200K
+- [x] SR-FBAM: 1M params
+  - [x] Frame Head: ~300K
+  - [x] Integrator (LSTM+MLP): ~500K
+  - [x] Embeddings: ~200K
 - [ ] Transformer baseline: 1M +/-10%
 - [ ] Pure LSTM baseline: 1M +/-10%
 - [ ] Pure FBAM baseline: 1M +/-10%
 
+- [x] Instructor-labeled action loss (`compute_action_loss`)
+
 ## Training Config
 - [ ] TBPTT = 256 steps
 - [ ] Micro-batching (batch size = ?)
-- [ ] Gradient clipping (threshold = ?)
+- [x] Gradient clipping (threshold = 1.0)
 - [ ] Activation recomputation enabled
-- [ ] Logging hooks for hop traces (ExperimentLogger)
+- [x] Logging hooks for hop traces (ExperimentLogger)
 - [x] Data loaders wired into training harness (`src/training/train.py`)
+- [x] SR-FBAM supervised training loop (`train_srfbam`)
 
 ## Logging Schema
 - [x] HopTrace dataclass implemented
