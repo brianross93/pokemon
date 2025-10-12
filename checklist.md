@@ -34,8 +34,8 @@
 - [ ] Auto-generated plots from JSON
 
 ## Operators (5 total)
-- [ ] ASSOC: associate/query by relation
-- [ ] FOLLOW: traverse edge
-- [ ] VOTE: consensus/confidence
-- [ ] WRITE: update graph
-- [ ] HALT: terminate
+- [x] ASSOC: associate/query by relation
+- [x] FOLLOW: traverse edge
+- [x] VOTE: consensus/confidence
+- [x] WRITE: update graph
+- [x] HALT: terminate

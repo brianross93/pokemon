@@ -239,7 +239,7 @@ class Integrator(nn.Module):
             [frame_embed.unsqueeze(0), node_embed.unsqueeze(0), action_vec],
             dim=-1,
         )
-        h, c = self.lstm_cell(lstm_input.squeeze(0), state)
+        h, c = self.lstm_cell(lstm_input, (state[0], state[1]))
         logits = self.action_head(h)
         confidence = torch.sigmoid(self.confidence_head(h))
         return h, c, logits.squeeze(0), confidence.squeeze(0)
@@ -330,9 +330,51 @@ class MemoryContext:
                 description = "VOTE fallback"
 
         elif action == Action.WRITE:
-            # Placeholder: in Phase 1 we only log the intent.
-            candidates = self.state.get("current_nodes", [])
-            description = "WRITE noop"
+            new_node_id = plan_step.get("write_node")
+            new_name = plan_step.get("write_name", new_node_id)
+            new_type = plan_step.get("write_type", "Fact")
+            new_relation = plan_step.get("write_relation") or relation or "related_to"
+            link_target = plan_step.get("write_target") or target_id or source_id
+
+            if new_node_id and link_target:
+                # Add node if unseen
+                if new_node_id not in self.kg.nodes_by_id:
+                    from src.data.kg_loader import Node, Edge
+                    new_node = Node(
+                        node_id=new_node_id,
+                        node_type=new_type,
+                        name=new_name,
+                        aliases=[],
+                    )
+                    self.kg.nodes_by_id[new_node_id] = new_node
+                    self.kg.graph.add_node(
+                        new_node_id,
+                        node_type=new_type,
+                        name=new_name,
+                        aliases=[],
+                    )
+
+                # Add edge linking to existing target/source
+                edge = Edge(
+                    src_id=link_target,
+                    relation=new_relation,
+                    dst_id=new_node_id,
+                    weight=1.0,
+                )
+                self.kg.graph.add_edge(
+                    edge.src_id,
+                    edge.dst_id,
+                    relation=edge.relation,
+                    weight=edge.weight,
+                    is_noisy=False,
+                )
+                self.kg.edges.append(edge)
+
+                candidates = [new_node_id]
+                description = f"WRITE added node={new_node_id} via relation={new_relation}"
+            else:
+                candidates = self.state.get("current_nodes", [])
+                description = "WRITE skipped (insufficient plan data)"
 
         self.state["candidate_history"].append(candidates)
         if candidates:
