@@ -23,6 +23,7 @@ from typing import Iterator, List, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader, Dataset
 
 # Ensure the package root is importable when running as a script
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -128,6 +129,24 @@ def prepare_harness(
     return TrainingHarness(config)
 
 
+class QueryDataset(Dataset):
+    """Dataset wrapper for batching queries."""
+
+    def __init__(self, queries: List[Query]) -> None:
+        self.queries = queries
+
+    def __len__(self) -> int:
+        return len(self.queries)
+
+    def __getitem__(self, idx: int) -> Query:
+        return self.queries[idx]
+
+
+def collate_queries(batch: List[Query]) -> List[Query]:
+    """Identity collation function."""
+    return batch
+
+
 def compute_action_loss(model: SRFBAM, query: Query, kg: KnowledgeGraph) -> torch.Tensor:
     """
     Supervised loss that teaches the integrator to choose the action sequence
@@ -182,63 +201,121 @@ def compute_action_loss(model: SRFBAM, query: Query, kg: KnowledgeGraph) -> torc
     return torch.stack(losses).mean()
 
 
+def compute_action_loss_batch(
+    model: SRFBAM,
+    queries: List[Query],
+    kg: KnowledgeGraph,
+) -> Tuple[torch.Tensor, List[float]]:
+    """Compute average loss for a batch of queries."""
+    losses: List[torch.Tensor] = []
+    for query in queries:
+        losses.append(compute_action_loss(model, query, kg))
+
+    if not losses:
+        device = model.device
+        return torch.tensor(0.0, device=device, requires_grad=True), []
+
+    stacked = torch.stack(losses)
+    return stacked.mean(), [float(loss.item()) for loss in losses]
+
+
 def train_srfbam(
     harness: TrainingHarness,
     model: SRFBAM,
     epochs: int = 1,
     lr: float = 1e-3,
     clip_norm: float = 1.0,
+    batch_size: int = 8,
+    use_amp: bool = True,
     log_dir: Optional[Path] = None,
 ) -> None:
-    """Supervised training loop for SR-FBAM using symbolic plans."""
+    """Supervised training loop for SR-FBAM with batching and optional AMP."""
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    amp_enabled = use_amp and torch.cuda.is_available()
+    scaler = torch.cuda.amp.GradScaler() if amp_enabled else None
     log_dir = Path(log_dir or (ROOT_DIR / "results"))
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    device = model.device
+    print(
+        f"Training config: batch_size={batch_size}, "
+        f"AMP={amp_enabled}, device={device}"
+    )
+
     for epoch in range(1, epochs + 1):
         random.shuffle(harness.queries)
+        dataset = QueryDataset(harness.queries)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_queries,
+        )
+
         epoch_losses: List[float] = []
         correct = 0
         total = 0
 
-        for query in harness.queries:
-            start_time = perf_counter()
+        for batch_queries in dataloader:
             model.train()
-            loss = compute_action_loss(model, query, harness.kg)
+            start_time = perf_counter()
+
+            if amp_enabled:
+                with torch.cuda.amp.autocast():
+                    batch_loss, individual_losses = compute_action_loss_batch(
+                        model, batch_queries, harness.kg
+                    )
+            else:
+                batch_loss, individual_losses = compute_action_loss_batch(
+                    model, batch_queries, harness.kg
+                )
 
             optimizer.zero_grad()
-            loss.backward()
-            if clip_norm is not None and clip_norm > 0:
-                clip_grad_norm_(model.parameters(), clip_norm)
-            optimizer.step()
-            epoch_losses.append(float(loss.item()))
+            if scaler is not None:
+                scaler.scale(batch_loss).backward()
+                if clip_norm is not None and clip_norm > 0:
+                    scaler.unscale_(optimizer)
+                    clip_grad_norm_(model.parameters(), clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                batch_loss.backward()
+                if clip_norm is not None and clip_norm > 0:
+                    clip_grad_norm_(model.parameters(), clip_norm)
+                optimizer.step()
+
+            training_duration_ms = (perf_counter() - start_time) * 1000.0
+            epoch_losses.extend(individual_losses)
 
             model.eval()
             with torch.no_grad():
-                output = model.reason(query, harness.kg)
+                for query, query_loss in zip(batch_queries, individual_losses):
+                    inference_start = perf_counter()
+                    output = model.reason(query, harness.kg)
+                    inference_ms = (perf_counter() - inference_start) * 1000.0
+                    wall_time_ms = (training_duration_ms / max(len(batch_queries), 1)) + inference_ms
 
-            wall_time_ms = (perf_counter() - start_time) * 1000.0
-            prediction_id = output.prediction_id or ""
-            is_correct = prediction_id == query.answer_id
-            correct += int(is_correct)
-            total += 1
+                    prediction_id = output.prediction_id or ""
+                    is_correct = prediction_id == query.answer_id
+                    correct += int(is_correct)
+                    total += 1
 
-            query_log = QueryLog(
-                query_id=query.query_id,
-                query_text=query.natural_language,
-                ground_truth=query.answer_id,
-                prediction=prediction_id,
-                correct=is_correct,
-                total_hops=len(output.hop_traces),
-                wall_time_ms=float(wall_time_ms),
-                final_loss=float(loss.item()),
-                peak_gpu_memory_mb=current_gpu_memory_mb(),
-                graph_size_nodes=harness.graph_node_count,
-                model_type="sr_fbam",
-                timestamp_iso=datetime.utcnow().isoformat(),
-                hops=output.hop_traces,
-            )
-            harness.logger.log_query(query_log)
+                    query_log = QueryLog(
+                        query_id=query.query_id,
+                        query_text=query.natural_language,
+                        ground_truth=query.answer_id,
+                        prediction=prediction_id,
+                        correct=is_correct,
+                        total_hops=len(output.hop_traces),
+                        wall_time_ms=float(wall_time_ms),
+                        final_loss=float(query_loss),
+                        peak_gpu_memory_mb=current_gpu_memory_mb(),
+                        graph_size_nodes=harness.graph_node_count,
+                        model_type="sr_fbam",
+                        timestamp_iso=datetime.utcnow().isoformat(),
+                        hops=output.hop_traces,
+                    )
+                    harness.logger.log_query(query_log)
 
         mean_loss = sum(epoch_losses) / max(len(epoch_losses), 1)
         accuracy = correct / max(total, 1)
@@ -266,6 +343,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--clip-norm", type=float, default=1.0, help="Gradient clipping norm")
+    parser.add_argument("--batch-size", type=int, default=8, help="Micro-batch size")
+    parser.add_argument("--no-amp", action="store_true", help="Disable AMP even if CUDA is available")
     parser.add_argument("--device", default=None, help="Torch device (e.g., cuda, cpu)")
     parser.add_argument("--log-dir", default=None, help="Directory for JSON logs")
     args = parser.parse_args(argv)
@@ -285,6 +364,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         epochs=args.epochs,
         lr=args.lr,
         clip_norm=args.clip_norm,
+        batch_size=args.batch_size,
+        use_amp=not args.no_amp,
         log_dir=Path(args.log_dir) if args.log_dir else None,
     )
 
