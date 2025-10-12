@@ -32,6 +32,7 @@
 - [x] QueryLog dataclass implemented
 - [x] JSON output per experiment run
 - [x] Auto-generated plots from JSON
+- [x] Plotting script + summary tooling (`scripts/plot_results.py`)
 
 ## Operators (5 total)
 - [x] ASSOC: associate/query by relation
@@ -39,3 +40,10 @@
 - [x] VOTE: consensus/confidence
 - [x] WRITE: update graph
 - [x] HALT: terminate
+
+## Deployment & Demo
+- [x] Checkpoint saving & best-model tracking
+- [x] Evaluation mode for reuse (`--mode eval`)
+- [x] Interactive demo script (`scripts/demo.py`)
+- [x] Notebook walkthrough (`notebooks/02_demo_inference.ipynb`)
+- [x] Quick start docs & requirements
