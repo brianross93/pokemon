@@ -1,0 +1,37 @@
+PRIMARY_METRICS:
+  loss:
+    definition: "Cross-entropy on final answer prediction"
+    measurement: "Per-hop: log loss after each operator; final: loss at HALT"
+  wall_time:
+    definition: "End-to-end inference time (query to answer)"
+    exclusions: "Graph initialization and model load"
+    measurement: "GPU-synchronized, averaged over 100 queries"
+  memory:
+    gpu_memory: "torch.cuda.max_memory_allocated() during single query"
+    graph_memory: "sys.getsizeof(graph) + node_count * avg_node_size"
+
+BASELINE_SPECS:
+  sr_fbam:
+    params: "1e6"
+    frame_head: "3e5"
+    integrator: "5e5"
+    embeddings: "2e5"
+  transformer:
+    params: "1e6"
+    tolerance: 0.1
+    notes: "Match SR-FBAM within 10% parameter count"
+  pure_lstm:
+    params: "1e6"
+    tolerance: 0.1
+  fbam:
+    params: "1e6"
+    tolerance: 0.1
+
+SECONDARY_METRICS:
+  hops_to_answer: "Count of ASSOC/FOLLOW/WRITE before HALT"
+  accuracy: "Exact match on final entity prediction"
+  trace_clarity: "Qualitative reviewer score (0-2)" 
+
+VALIDATION:
+  parameter_budget_check: "Assert each baseline within 10% of 1M"
+  log_schema: "All runs emit QueryLog JSON records"
