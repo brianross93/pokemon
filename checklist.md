@@ -31,7 +31,7 @@
 - [x] HopTrace dataclass implemented
 - [x] QueryLog dataclass implemented
 - [x] JSON output per experiment run
-- [ ] Auto-generated plots from JSON
+- [x] Auto-generated plots from JSON
 
 ## Operators (5 total)
 - [x] ASSOC: associate/query by relation
