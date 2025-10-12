@@ -12,9 +12,9 @@
   - [ ] Frame Head: ~300K
   - [ ] Integrator (LSTM+MLP): ~500K
   - [ ] Embeddings: ~200K
-- [ ] Transformer baseline: 1M ±10%
-- [ ] Pure LSTM baseline: 1M ±10%
-- [ ] Pure FBAM baseline: 1M ±10%
+- [ ] Transformer baseline: 1M +/-10%
+- [ ] Pure LSTM baseline: 1M +/-10%
+- [ ] Pure FBAM baseline: 1M +/-10%
 
 ## Training Config
 - [ ] TBPTT = 256 steps
@@ -22,6 +22,7 @@
 - [ ] Gradient clipping (threshold = ?)
 - [ ] Activation recomputation enabled
 - [ ] Logging hooks for hop traces (ExperimentLogger)
+- [x] Data loaders wired into training harness (`src/training/train.py`)
 
 ## Logging Schema
 - [x] HopTrace dataclass implemented
