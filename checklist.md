@@ -14,7 +14,7 @@
   - [x] Embeddings: ~200K
 - [x] Transformer baseline: 1M +/-10%
 - [x] Pure LSTM baseline: 1M +/-10%
-- [ ] Pure FBAM baseline: 1M +/-10%
+- [x] Pure FBAM baseline: 1M +/-10%
 
 - [x] Instructor-labeled action loss (`compute_action_loss`)
 
@@ -49,3 +49,4 @@
 - [x] Quick start docs & requirements
 - [x] LSTM baseline pipeline (`src/training/train_lstm.py`)
 - [x] Transformer baseline pipeline (`src/training/train_transformer.py`)
+- [x] FBAM baseline pipeline (`src/training/train_fbam.py`)

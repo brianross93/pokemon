@@ -94,7 +94,33 @@ python src/training/train_transformer.py \
     --log-dir results
 ```
 
-## 6. Run Stress Tests
+## 6. Train the FBAM Baseline
+
+```bash
+python src/training/train_fbam.py \
+    --mode train \
+    --split train \
+    --epochs 10 \
+    --batch-size 8 \
+    --device cpu \
+    --checkpoint-dir checkpoints \
+    --log-dir results \
+    --experiment-name fbam_train
+```
+
+Evaluate:
+
+```bash
+python src/training/train_fbam.py \
+    --mode eval \
+    --checkpoint checkpoints/fbam_train_best.pt \
+    --split eval \
+    --device cpu \
+    --experiment-name fbam_eval \
+    --log-dir results
+```
+
+## 7. Run Stress Tests
 
 ```bash
 for variant in ambiguous_nodes long_chains noisy_edges missing_nodes graph_growth; do
@@ -108,7 +134,7 @@ for variant in ambiguous_nodes long_chains noisy_edges missing_nodes graph_growt
 done
 ```
 
-## 7. Analyze Hop-Depth Scaling
+## 8. Analyze Hop-Depth Scaling
 
 ```bash
 python scripts/analyze_scaling.py \
@@ -118,7 +144,7 @@ python scripts/analyze_scaling.py \
 
 This prints accuracy and loss by hop depth, fits a power law, and saves plots/summary under `plots/scaling/`.
 
-## 8. Generate Plots
+## 9. Generate Plots
 
 ```bash
 python scripts/plot_results.py \
@@ -132,7 +158,7 @@ python scripts/plot_results.py \
 
 The script emits PNG plots (loss, accuracy, hop distribution, wall-time, action usage, confidence trajectories) and a `summary.txt`.
 
-## 9. Interactive Demo
+## 10. Interactive Demo
 
 ```bash
 python scripts/demo.py \
@@ -142,7 +168,7 @@ python scripts/demo.py \
 
 Follow the prompts to inspect sample queries and view hop-by-hop traces.
 
-## 10. Notebook Exploration
+## 11. Notebook Exploration
 
 Open `notebooks/02_demo_inference.ipynb` in Jupyter Lab or VS Code to run queries and visualise reasoning graphs interactively.
 
