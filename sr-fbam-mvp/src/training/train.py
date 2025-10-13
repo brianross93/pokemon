@@ -318,10 +318,12 @@ def train_srfbam(
                         total_hops=len(output.hop_traces),
                         wall_time_ms=float(wall_time_ms),
                         final_loss=float(query_loss),
+                        teacher_forcing_loss=float(query_loss),
                         peak_gpu_memory_mb=current_gpu_memory_mb(),
                         graph_size_nodes=harness.graph_node_count,
                         model_type="sr_fbam",
                         timestamp_iso=datetime.utcnow().isoformat(),
+                        plan_length=len(query.symbolic_plan) if isinstance(query.symbolic_plan, list) else 0,
                         hops=output.hop_traces,
                     )
                     harness.logger.log_query(query_log)
@@ -400,36 +402,40 @@ def eval_srfbam(
         f"(variant={harness.config.variant or 'baseline'})"
     )
 
-    with torch.no_grad():
-        for idx, query in enumerate(harness.queries, start=1):
+    for idx, query in enumerate(harness.queries, start=1):
+        with torch.no_grad():
             start_time = perf_counter()
             output = model.reason(query, harness.kg)
             wall_time_ms = (perf_counter() - start_time) * 1000.0
 
-            prediction_id = output.prediction_id or ""
-            is_correct = prediction_id == query.answer_id
-            correct += int(is_correct)
-            total += 1
+        tf_loss = compute_action_loss(model, query, harness.kg).detach()
 
-            query_log = QueryLog(
-                query_id=query.query_id,
-                query_text=query.natural_language,
-                ground_truth=query.answer_id,
-                prediction=prediction_id,
-                correct=is_correct,
-                total_hops=len(output.hop_traces),
-                wall_time_ms=float(wall_time_ms),
-                final_loss=0.0,
-                peak_gpu_memory_mb=current_gpu_memory_mb(),
-                graph_size_nodes=harness.graph_node_count,
-                model_type="sr_fbam",
-                timestamp_iso=datetime.utcnow().isoformat(),
-                hops=output.hop_traces,
-            )
-            harness.logger.log_query(query_log)
+        prediction_id = output.prediction_id or ""
+        is_correct = prediction_id == query.answer_id
+        correct += int(is_correct)
+        total += 1
 
-            if verbose and (idx % 10 == 0 or idx == len(harness.queries)):
-                print(f"  [{idx}/{len(harness.queries)}] accuracy={correct/total:.3f}")
+        query_log = QueryLog(
+            query_id=query.query_id,
+            query_text=query.natural_language,
+            ground_truth=query.answer_id,
+            prediction=prediction_id,
+            correct=is_correct,
+            total_hops=len(output.hop_traces),
+            wall_time_ms=float(wall_time_ms),
+            final_loss=float(tf_loss.item()),
+            teacher_forcing_loss=float(tf_loss.item()),
+            peak_gpu_memory_mb=current_gpu_memory_mb(),
+            graph_size_nodes=harness.graph_node_count,
+            model_type="sr_fbam",
+            timestamp_iso=datetime.utcnow().isoformat(),
+            plan_length=len(query.symbolic_plan) if isinstance(query.symbolic_plan, list) else 0,
+            hops=output.hop_traces,
+        )
+        harness.logger.log_query(query_log)
+
+        if verbose and (idx % 10 == 0 or idx == len(harness.queries)):
+            print(f"  [{idx}/{len(harness.queries)}] accuracy={correct/total:.3f}")
 
     log_path = log_dir / f"{harness.config.experiment_name}.json"
     harness.save_logs(log_path)

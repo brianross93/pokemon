@@ -35,10 +35,12 @@ class QueryLog:
     total_hops: int
     wall_time_ms: float
     final_loss: float
+    teacher_forcing_loss: float
     peak_gpu_memory_mb: float
     graph_size_nodes: int
     model_type: str
     timestamp_iso: str
+    plan_length: int
     hops: List[HopTrace]
 
 

@@ -1,5 +1,5 @@
 """
-Training and evaluation script for the LSTM baseline.
+Training and evaluation script for the Transformer baseline.
 """
 from __future__ import annotations
 
@@ -14,15 +14,14 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_, rnn
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
-# Ensure project root is importable
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
-from src.models.lstm_baseline import LSTMBaseline, LSTMBaselineConfig
+from src.models.transformer_baseline import TransformerBaseline, TransformerBaselineConfig
 from src.training.train import (
     TrainingHarness,
     prepare_harness,
@@ -32,18 +31,8 @@ from src.training.train import (
 from src.evaluation.logger_schema import QueryLog, current_gpu_memory_mb
 
 
-@dataclass
-class LSTMTrainingConfig:
-    data_dir: Path
-    variant: Optional[str]
-    split: str
-    experiment_name: str
-
-
-class LSTMBatcher:
-    """Utility to encode queries and targets for the LSTM baseline."""
-
-    def __init__(self, model: LSTMBaseline, node_to_idx: Dict[str, int], device: torch.device) -> None:
+class TransformerBatcher:
+    def __init__(self, model: TransformerBaseline, node_to_idx: Dict[str, int], device: torch.device) -> None:
         self.model = model
         self.node_to_idx = node_to_idx
         self.device = device
@@ -53,21 +42,24 @@ class LSTMBatcher:
             self.model.encode_query(query.natural_language, self.device)
             for query in queries
         ]
-        padded = rnn.pad_sequence(sequences, batch_first=True, padding_value=0)
-
+        padded = torch.nn.utils.rnn.pad_sequence(
+            sequences,
+            batch_first=True,
+            padding_value=0,
+        )
         targets = []
         for query in queries:
             idx = self.node_to_idx.get(query.answer_id)
             if idx is None:
-                raise ValueError(f"Answer {query.answer_id} not in node vocabulary.")
+                raise ValueError(f"Answer {query.answer_id} missing from node vocabulary.")
             targets.append(idx)
         target_tensor = torch.tensor(targets, dtype=torch.long, device=self.device)
         return padded, target_tensor
 
 
-def train_lstm(
+def train_transformer(
     harness: TrainingHarness,
-    model: LSTMBaseline,
+    model: TransformerBaseline,
     epochs: int = 10,
     lr: float = 1e-3,
     clip_norm: float = 1.0,
@@ -87,11 +79,9 @@ def train_lstm(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     device = next(model.parameters()).device
-
     node_to_idx = {node_id: idx for idx, node_id in enumerate(harness.kg.nodes_by_id.keys())}
     idx_to_node = {idx: node_id for node_id, idx in node_to_idx.items()}
-
-    batcher = LSTMBatcher(model, node_to_idx, device)
+    batcher = TransformerBatcher(model, node_to_idx, device)
 
     best_accuracy = 0.0
     best_checkpoint = checkpoint_dir / f"{harness.config.experiment_name}_best.pt"
@@ -99,9 +89,8 @@ def train_lstm(
     for epoch in range(1, epochs + 1):
         model.train()
         random.shuffle(harness.queries)
-        dataset = QueryDataset(harness.queries)
         dataloader = DataLoader(
-            dataset,
+            QueryDataset(harness.queries),
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_queries,
@@ -113,8 +102,8 @@ def train_lstm(
 
         for batch_queries in dataloader:
             inputs, targets = batcher.encode_queries(batch_queries)
-
             optimizer.zero_grad()
+
             if amp_enabled:
                 with torch.cuda.amp.autocast():
                     logits = model(inputs)
@@ -165,21 +154,14 @@ def train_lstm(
                 torch.save(checkpoint, best_checkpoint)
                 print(f"[BEST] accuracy {accuracy:.3f} at {best_checkpoint.name}")
 
-        # log summary for this epoch (no per-query logs during training)
-        summary_log = log_dir / f"{harness.config.experiment_name}_train.txt"
-        with summary_log.open("a", encoding="utf-8") as f:
-            f.write(
-                f"epoch={epoch}, loss={mean_loss:.4f}, accuracy={accuracy:.3f}\n"
-            )
-
     if best_checkpoint.exists():
         print(f"Best checkpoint: {best_checkpoint.resolve()}")
 
 
-def load_lstm_checkpoint(checkpoint_path: Path, device: Optional[str] = None) -> Tuple[LSTMBaseline, Dict[int, str]]:
+def load_transformer_checkpoint(checkpoint_path: Path, device: Optional[str] = None) -> Tuple[TransformerBaseline, Dict[int, str]]:
     checkpoint = torch.load(checkpoint_path, map_location=device or "cpu")
-    config = LSTMBaselineConfig(**checkpoint.get("config", {}))
-    model = LSTMBaseline(config)
+    config = TransformerBaselineConfig(**checkpoint.get("config", {}))
+    model = TransformerBaseline(config)
     model.load_state_dict(checkpoint["model_state_dict"])
     if device:
         model = model.to(torch.device(device))
@@ -187,15 +169,15 @@ def load_lstm_checkpoint(checkpoint_path: Path, device: Optional[str] = None) ->
     if idx_to_node is None:
         raise ValueError("Checkpoint missing idx_to_node mapping.")
     print(
-        f"Loaded LSTM checkpoint {checkpoint_path.name} "
+        f"Loaded Transformer checkpoint {checkpoint_path.name} "
         f"(epoch={checkpoint.get('epoch')}, accuracy={checkpoint.get('accuracy', 0):.3f})"
     )
     return model, idx_to_node
 
 
-def eval_lstm(
+def eval_transformer(
     harness: TrainingHarness,
-    model: LSTMBaseline,
+    model: TransformerBaseline,
     idx_to_node: Dict[int, str],
     log_dir: Optional[Path] = None,
     verbose: bool = True,
@@ -204,34 +186,33 @@ def eval_lstm(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     device = next(model.parameters()).device
+    node_to_idx = {node: idx for idx, node in idx_to_node.items()}
+    batcher = TransformerBatcher(model, node_to_idx, device)
+
     model.eval()
-
-    node_to_idx = {node_id: idx for idx, node_id in idx_to_node.items()}
-    batcher = LSTMBatcher(model, node_to_idx, device)
-
     correct = 0
     total = 0
-    total_wall = []
+    wall_times = []
 
     for idx, query in enumerate(harness.queries, start=1):
-        query_tensor, target_tensor = batcher.encode_queries([query])
+        inputs, targets = batcher.encode_queries([query])
         start = perf_counter()
         with torch.no_grad():
-            logits = model(query_tensor)
+            logits = model(inputs)
         wall_ms = (perf_counter() - start) * 1000.0
-
         pred_idx = int(logits.argmax(dim=1).item())
-        pred_node = idx_to_node.get(pred_idx)
+        pred_node = idx_to_node.get(pred_idx, "")
         is_correct = pred_node == query.answer_id
+
         correct += int(is_correct)
         total += 1
-        total_wall.append(wall_ms)
+        wall_times.append(wall_ms)
 
         query_log = QueryLog(
             query_id=query.query_id,
             query_text=query.natural_language,
             ground_truth=query.answer_id,
-            prediction=pred_node or "",
+            prediction=pred_node,
             correct=is_correct,
             total_hops=0,
             wall_time_ms=float(wall_ms),
@@ -239,7 +220,7 @@ def eval_lstm(
             teacher_forcing_loss=0.0,
             peak_gpu_memory_mb=current_gpu_memory_mb(),
             graph_size_nodes=harness.graph_node_count,
-            model_type="lstm_baseline",
+            model_type="transformer_baseline",
             timestamp_iso=datetime.utcnow().isoformat(),
             plan_length=len(query.symbolic_plan) if isinstance(query.symbolic_plan, list) else 0,
             hops=[],
@@ -253,45 +234,44 @@ def eval_lstm(
     harness.save_logs(log_path)
 
     accuracy = correct / max(total, 1)
-    mean_wall = sum(total_wall) / max(len(total_wall), 1)
-    print(f"\n[OK] LSTM evaluation complete: accuracy={accuracy:.3f}, mean_wall_time_ms={mean_wall:.2f}")
+    mean_wall = sum(wall_times) / max(len(wall_times), 1)
+    print(f"\n[OK] Transformer evaluation complete: accuracy={accuracy:.3f}, mean_wall_time_ms={mean_wall:.2f}")
     print(f"Logs saved to {log_path.resolve()}")
-
     return {"accuracy": accuracy, "mean_wall_time_ms": mean_wall}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Train/Eval LSTM baseline")
+    parser = argparse.ArgumentParser(description="Train/Eval Transformer baseline")
     parser.add_argument("--mode", choices=["train", "eval"], default="train", help="Run mode")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path for eval")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint for eval")
     parser.add_argument("--data-dir", default="data", help="Dataset directory")
     parser.add_argument("--variant", default=None, help="Stress-test variant")
     parser.add_argument("--split", default="train", help="Dataset split")
-    parser.add_argument("--experiment-name", default=None, help="Experiment name prefix")
+    parser.add_argument("--experiment-name", default=None, help="Experiment name")
     parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--clip-norm", type=float, default=1.0, help="Gradient clipping norm")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument("--no-amp", action="store_true", help="Disable AMP")
     parser.add_argument("--device", default="cpu", help="Torch device")
-    parser.add_argument("--log-dir", default=None, help="Directory for JSON logs")
+    parser.add_argument("--log-dir", default=None, help="Directory for logs")
     parser.add_argument("--checkpoint-dir", default=None, help="Directory for checkpoints")
-    parser.add_argument("--save-every", type=int, default=1, help="Checkpoint every N epochs")
+    parser.add_argument("--save-every", type=int, default=1, help="Save checkpoint interval")
     args = parser.parse_args(argv)
 
     harness = prepare_harness(
         args.data_dir,
         variant=args.variant,
         split=args.split,
-        experiment_name=args.experiment_name or f"lstm_{args.split}",
+        experiment_name=args.experiment_name or f"transformer_{args.split}",
     )
     print(harness.dataset_summary())
 
     if args.mode == "train":
-        config = LSTMBaselineConfig()
-        model = LSTMBaseline(config).to(torch.device(args.device))
-        print(f"LSTM parameter count: {model.parameter_count():,}")
-        train_lstm(
+        config = TransformerBaselineConfig()
+        model = TransformerBaseline(config).to(torch.device(args.device))
+        print(f"Transformer parameter count: {model.parameter_count():,}")
+        train_transformer(
             harness,
             model,
             epochs=args.epochs,
@@ -306,9 +286,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         if not args.checkpoint:
             raise ValueError("--checkpoint is required in eval mode")
-        model, idx_to_node = load_lstm_checkpoint(Path(args.checkpoint), device=args.device)
+        model, idx_to_node = load_transformer_checkpoint(Path(args.checkpoint), device=args.device)
         model = model.to(torch.device(args.device))
-        eval_lstm(
+        eval_transformer(
             harness,
             model,
             idx_to_node,
