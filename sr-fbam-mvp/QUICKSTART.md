@@ -42,6 +42,32 @@ python src/training/train.py \
 
 Evaluation logs are written to `results/sr_fbam_eval.json`.
 
+## 4. Train the LSTM Baseline
+
+```bash
+python src/training/train_lstm.py \
+    --mode train \
+    --split train \
+    --epochs 10 \
+    --batch-size 8 \
+    --device cpu \
+    --checkpoint-dir checkpoints \
+    --log-dir results \
+    --experiment-name lstm_train
+```
+
+Evaluate the baseline:
+
+```bash
+python src/training/train_lstm.py \
+    --mode eval \
+    --checkpoint checkpoints/lstm_train_best.pt \
+    --split eval \
+    --device cpu \
+    --experiment-name lstm_eval \
+    --log-dir results
+```
+
 ## 4. Run Stress Tests
 
 ```bash

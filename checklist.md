@@ -13,7 +13,7 @@
   - [x] Integrator (LSTM+MLP): ~500K
   - [x] Embeddings: ~200K
 - [ ] Transformer baseline: 1M +/-10%
-- [ ] Pure LSTM baseline: 1M +/-10%
+- [x] Pure LSTM baseline: 1M +/-10%
 - [ ] Pure FBAM baseline: 1M +/-10%
 
 - [x] Instructor-labeled action loss (`compute_action_loss`)
@@ -47,3 +47,7 @@
 - [x] Interactive demo script (`scripts/demo.py`)
 - [x] Notebook walkthrough (`notebooks/02_demo_inference.ipynb`)
 - [x] Quick start docs & requirements
+- [x] Interactive demo script (`scripts/demo.py`)
+- [x] Notebook walkthrough (`notebooks/02_demo_inference.ipynb`)
+- [x] Quick start docs & requirements
+- [x] LSTM baseline pipeline (`src/training/train_lstm.py`)
