@@ -1,0 +1,98 @@
+# Mixed-mode plan training configuration stub.
+# Populate concrete paths/values in environment-specific overlays.
+
+defaults: []
+
+mix:
+  warmup_epochs: 3
+  schedule:
+    - end_epoch: 3
+      battle_fraction: 0.85
+      overworld_fraction: 0.15
+      description: "Warmup on battle traces, trickle in corridor planlets."
+    - end_epoch: 6
+      battle_fraction: 0.65
+      overworld_fraction: 0.35
+      description: "Stabilise gate heads with corridor supervision."
+    - end_epoch: 10
+      battle_fraction: 0.50
+      overworld_fraction: 0.50
+      description: "Balanced curriculum once overworld telemetry is validated."
+  gate_targets:
+    adherence_weight: 1.5
+    off_plan_penalty: 2.0
+  sampler:
+    shuffle: true
+    battle_bucket_size: 2048
+    overworld_bucket_size: 1536
+    plan_dropout_probability: 0.15
+    min_overworld_per_batch: 8
+    max_overworld_per_batch: 24
+
+augmentations:
+  global_seed: 202511
+  tile_jitter:
+    enabled: true
+    max_offset: 1          # Manhattan offset applied to overworld tiles.
+    apply_probability: 0.4
+  encounter_injection:
+    enabled: true
+    apply_probability: 0.1
+    templates:
+      - skill: "navigate"
+        encounter_id: "pidgey_corridor"
+        min_step: 12
+        replace_speedup: false
+      - skill: "pickup"
+        encounter_id: "hidden_item_route2"
+        min_step: 24
+        replace_speedup: true
+  plan_dropout:
+    enabled: true
+    feature_drop_probability: 0.2
+    gate_label_drop_probability: 0.05
+    adherence_flag_floor: 0.2
+
+overworld_requirements:
+  skills:
+    - navigate
+    - interact
+    - talk
+    - buy
+    - pickup
+    - use_item
+    - menu
+    - wait
+  traces_per_skill: 50
+  corridor_seed_set:
+    - corridor_a
+    - corridor_b
+    - corridor_c
+    - corridor_d
+  telemetry_sources:
+    - data/overworld/corridor/*.jsonl
+    - data/overworld/debug/*.jsonl
+
+gating_heuristics:
+  battle_warmup:
+    encode_ceiling: 0.35
+    plan_lookup_floor: 0.20
+    plan_step_floor: 0.05
+  mixed_curriculum:
+    encode_band: [0.28, 0.4]
+    plan_lookup_band: [0.18, 0.28]
+    plan_step_band: [0.12, 0.22]
+    adherence_target: 0.68
+  alerts:
+    adherence_drop_threshold: 0.05   # Absolute adherence delta triggering alert.
+    skip_spike_threshold: 0.1        # Skip fraction > baseline + threshold.
+
+evaluation:
+  val_frequency: 1
+  metrics_out: results/train_plan/metrics.json
+  gate_trace_out: results/train_plan/gate_trace.jsonl
+
+notes:
+  - "Warmup keeps overworld proportion low until telemetry QA passes."
+  - "Plan dropout probability can be annealed to 0 once controller stabilises."
+  - "Encounter injection templates reference IDs resolved in data/overworld/static_entities.json."

@@ -34,6 +34,8 @@ DEFAULT_ADDRS: Dict[str, int] = {
     "in_battle": 0xD057,  # wIsInBattle
     "species_id": 0xD0B5,  # wEnemyMonSpecies
     "step_counter": 0xD31C,  # wStepCounter
+    "rng_seed_high": 0x0000,  # Populated once verified via debug_overworld_addresses.py
+    "rng_seed_low": 0x0000,
 }
 
 if WindowEvent is not None:
@@ -113,6 +115,25 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         self._tick(60)
         self._ensure_bootstrapped()
         return self._read_telemetry()
+
+    def set_rng_seed(self, seed: int) -> None:
+        """
+        Attempt to write a deterministic RNG seed into emulator memory.
+
+        The default addresses are placeholders; override PyBoyConfig.addresses with the
+        correct offsets exposed by debug_overworld_addresses.py.
+        """
+        seed = int(seed) & 0xFFFF
+        high = (seed >> 8) & 0xFF
+        low = seed & 0xFF
+        addr = self.config.addresses
+        memory = self.pyboy.memory
+        high_addr = addr.get("rng_seed_high", 0)
+        low_addr = addr.get("rng_seed_low", 0)
+        if high_addr:
+            memory[high_addr] = high
+        if low_addr:
+            memory[low_addr] = low
 
     # ------------------------------------------------------------------ #
     # Battle adapter bridge
