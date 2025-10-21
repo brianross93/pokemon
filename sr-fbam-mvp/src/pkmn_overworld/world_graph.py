@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 from src.overworld.graph.overworld_memory import OverworldMemory
@@ -19,6 +21,9 @@ class TileSpec:
     terrain: Optional[str] = None
 
 
+DEFAULT_STATIC_PATH = Path(__file__).resolve().parents[2] / "data" / "overworld" / "static_entities.json"
+
+
 class WorldGraph:
     """
     Lightweight helper around :class:`OverworldMemory` for building symbolic maps.
@@ -28,9 +33,22 @@ class WorldGraph:
     skills such as :class:`NavigateSkill`.
     """
 
-    def __init__(self, memory: Optional[OverworldMemory] = None) -> None:
+    _STATIC_CACHE: Optional[Dict[str, object]] = None
+
+    def __init__(
+        self,
+        memory: Optional[OverworldMemory] = None,
+        *,
+        load_static: bool = True,
+        static_path: Optional[Path] = None,
+    ) -> None:
         self._memory = memory or OverworldMemory()
         self._tiles: Dict[str, TileSpec] = {}
+        self._static_loaded = False
+        self._static_maps: Dict[str, Dict[str, object]] = {}
+
+        if load_static:
+            self._load_static_data(static_path or DEFAULT_STATIC_PATH)
 
     @property
     def memory(self) -> OverworldMemory:
@@ -52,7 +70,8 @@ class WorldGraph:
 
     def add_location(self, location_id: str, *, name: Optional[str] = None, tile: Optional[str] = None) -> str:
         attributes = {"name": name} if name else {}
-        attributes["tile"] = tile
+        if tile:
+            attributes["tile"] = tile
         node_id = f"location:{location_id}"
         self._write_node("Location", node_id, attributes)
         if tile:
@@ -122,6 +141,30 @@ class WorldGraph:
         self._write_node("Hazard", node_id, attributes)
         if tile:
             self._write_edge(node_id, "located_at", tile)
+        return node_id
+
+    def add_warp_hint(
+        self,
+        map_id: str,
+        x: int,
+        y: int,
+        *,
+        destination_map: str,
+        destination_warp: int,
+    ) -> str:
+        node_id = f"warp_hint:{map_id}:{int(x)}:{int(y)}"
+        attributes = {
+            "map_id": map_id,
+            "x": int(x),
+            "y": int(y),
+            "destination_map": destination_map,
+            "destination_warp": int(destination_warp),
+        }
+        self._write_node("WarpHint", node_id, attributes)
+        self._write_edge(node_id, "leads_to_map", f"location:{destination_map}")
+        self._write_edge(f"location:{map_id}", "has_warp", node_id)
+        tile_id = self.add_tile(map_id, x, y, terrain="warp")
+        self._write_edge(tile_id, "warp_hint", node_id)
         return node_id
 
     def set_player_position(self, map_id: str, x: int, y: int, *, facing: str = "south") -> None:
@@ -197,3 +240,95 @@ class WorldGraph:
     ) -> None:
         edge = Edge(relation=relation, src=src, dst=dst, attributes=attributes or {})
         self._memory.write(WriteOp(kind="edge", payload=edge))
+
+    # ------------------------------------------------------------------ #
+    # Static data loading
+    # ------------------------------------------------------------------ #
+
+    def _load_static_data(self, path: Path) -> None:
+        if self._static_loaded:
+            return
+        if not path.exists():
+            return
+        if WorldGraph._STATIC_CACHE is None:
+            WorldGraph._STATIC_CACHE = json.loads(path.read_text(encoding="utf-8"))
+        data = WorldGraph._STATIC_CACHE or {}
+        maps = data.get("maps", {})
+        if not isinstance(maps, dict):
+            return
+        self._ingest_static_maps(maps)
+        self._static_maps = maps  # type: ignore[assignment]
+        self._static_loaded = True
+
+    def _ingest_static_maps(self, maps: Dict[str, Dict[str, object]]) -> None:
+        # First pass: create location nodes for every map.
+        for map_key, payload in maps.items():
+            map_const = str(payload.get("constant") or map_key)
+            display_name = payload.get("label") or map_const
+            self.add_location(map_const, name=str(display_name))
+
+        # Second pass: connections, warps, NPCs, and background events.
+        for map_key, payload in maps.items():
+            map_const = str(payload.get("constant") or map_key)
+            location_node = f"location:{map_const}"
+
+            # Connections
+            connections = payload.get("connections") or []
+            if isinstance(connections, list):
+                for conn in connections:
+                    if not isinstance(conn, dict):
+                        continue
+                    target_const = str(conn.get("target_const") or conn.get("target_label") or "")
+                    if not target_const:
+                        continue
+                    self._write_edge(location_node, "connected_to", f"location:{target_const}")
+
+            # Warps
+            warps = payload.get("warps") or []
+            if isinstance(warps, list):
+                for warp in warps:
+                    if not isinstance(warp, dict):
+                        continue
+                    try:
+                        x = int(warp.get("x", 0))
+                        y = int(warp.get("y", 0))
+                        destination_map = str(warp.get("destination_map") or "")
+                        destination_warp = int(warp.get("destination_warp", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if not destination_map:
+                        continue
+                    self.add_warp_hint(map_const, x, y, destination_map=destination_map, destination_warp=destination_warp)
+
+            # NPCs
+            npcs = payload.get("npcs") or []
+            if isinstance(npcs, list):
+                for npc in npcs:
+                    if not isinstance(npc, dict):
+                        continue
+                    try:
+                        x = int(npc.get("x", 0))
+                        y = int(npc.get("y", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    tile_id = self.add_tile(map_const, x, y)
+                    sprite = npc.get("sprite")
+                    script = npc.get("script") or npc.get("name") or f"{map_const}_{x}_{y}"
+                    npc_id = f"{map_const}:{script}"
+                    self.add_npc(npc_id, name=str(sprite) if sprite else None, tile=tile_id)
+
+            # Background events (signs/triggers)
+            bg_events = payload.get("background_events") or []
+            if isinstance(bg_events, list):
+                for bg in bg_events:
+                    if not isinstance(bg, dict):
+                        continue
+                    try:
+                        x = int(bg.get("x", 0))
+                        y = int(bg.get("y", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    tile_id = self.add_tile(map_const, x, y)
+                    script = str(bg.get("script") or f"{map_const}_bg_{x}_{y}")
+                    trigger_id = f"{map_const}:{script}"
+                    self.add_trigger(trigger_id, kind="background_event", tile=tile_id)

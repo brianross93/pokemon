@@ -9,6 +9,7 @@ DoD = Definition of Done (unblocks the next phase)
 - [x] Frame renderer -> 40x120 grid
 - [x] Metamon trajectory ingestion + JSONL schema
 - [x] [new] WorldGraph skeleton (`pkmn_overworld/world_graph.py`)
+- [x] [new] Import static overworld entities from `pret/pokered` (map graph, NPCs, shops, hidden items -> `data/overworld/static_entities.json`)
 - [x] [new] Screen parsers for overworld (`pkmn_overworld/screen_parse.py`)
 
 DoD: One replay runs SR-FBAM-only in both modes (battle + corridor demo).
@@ -56,12 +57,13 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
 
 ## Phase 5 - Training & Distillation
 - [x] Extend battle dataset with plan features (per-turn plan embeddings, gate targets, adherence flags)
-- [ ] Materialize plan feature store + sampling weights for mixed-mode batches
+- [ ] Materialize plan feature store + sampling weights for mixed-mode batches (requires overworld trace import)
 - [x] Implement plan-conditioned controller training loop (dual-mode batches, gate supervision, teacher forcing)
 - [ ] Calibrate gate heads + scheduler (freeze/unfreeze plan gates, distillation losses, telemetry)
 - [ ] Set up self-distillation loop (LLM-on -> relabel -> retrain -> LLM-off) with checkpoint automation
 - [x] [new] Ship OverworldDecisionDataset with mode_bit + plan features (trajectory slicing, skill labels)
-- [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout)
+- [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout) — blocked on overworld telemetry import
+- [ ] [new] Generate overworld telemetry via PyBoy corridor runs (plan metadata + gate/adherence logs) — harness at `scripts/capture_overworld_telemetry.py`
 - [ ] [new] Ablations: no-plan vs plan features; text masked; gate frozen vs trainable; overworld-only gate freeze
 
 DoD: Mixed tasks maintain/improve success with >=40% fewer LLM calls; gate mix shows ENCODE down, PLAN_* up.
