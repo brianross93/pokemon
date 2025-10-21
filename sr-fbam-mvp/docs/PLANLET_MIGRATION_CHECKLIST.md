@@ -47,8 +47,8 @@ DoD: After a mixed run, data/planlets/planlets.parquet contains both kinds; cach
 - [ ] Map battle plan ops -> legal actions + fallbacks
 - [ ] Runtime precondition checks & graceful abort path
 - [ ] Telemetry: log gate probabilities, plan adherence, fallbacks
-- [ ] [new] Overworld skills (navigate, interact, talk, buy, pickup, use_item, menu, wait)
-- [ ] [new] Op->Skill registry with unit tests + illegal-state fuzzing
+- [x] [new] Overworld skills (navigate, interact, talk, buy, pickup, use_item, menu, wait)
+- [x] [new] Op->Skill registry with unit tests + illegal-state fuzzing
 - [ ] [new] Context switch logic (battle interrupts + resume or revise)
 - [ ] [new] Rule-based confidence gate v0 (pre-learned head)
 

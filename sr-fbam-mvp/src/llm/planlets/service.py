@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from pkmn_battle.graph.memory import GraphMemory
-from pkmn_battle.summarizer import summarize_for_llm
+from pkmn_battle.summarizer import GraphSummary, summarize_for_llm
 from pkmn_overworld.summarizer import summarize_world_for_llm
 from src.overworld import OverworldMemory
 
@@ -71,20 +71,32 @@ class PlanletService:
         nearby_limit: int = 5,
         allow_search: bool = True,
     ) -> PlanletProposal:
-        summary = summarize_world_for_llm(memory, nearby_limit=nearby_limit)
+        world_summary = summarize_world_for_llm(memory, nearby_limit=nearby_limit)
+        graph_summary = GraphSummary(
+            turn=0,
+            side=world_summary.side,
+            format=world_summary.map_id,
+            data={"overworld": world_summary.to_payload()},
+        )
         cache_key: Optional[str] = None
         if self.cache is not None:
-            cache_key = self.cache.overworld_key(summary, nearby_limit=nearby_limit)
+            cache_key = self.cache.overworld_key(world_summary, nearby_limit=nearby_limit)
             hit = self.cache.lookup(cache_key)
             if hit is not None:
-                proposal = self._proposal_from_cache(summary, hit)
+                proposal = self._proposal_from_cache(graph_summary, hit)
                 self._register_planlet(proposal.planlet.get("planlet_id"), cache_key)
-                self._persist_planlet(summary, proposal)
+                self._persist_planlet(world_summary, proposal)
                 return proposal
 
-        proposal = self.proposer.generate_planlet(summary, self.client, allow_search=allow_search)
+        graph_summary = GraphSummary(
+            turn=0,
+            side=world_summary.side,
+            format=world_summary.map_id,
+            data={"overworld": world_summary.to_payload()},
+        )
+        proposal = self.proposer.generate_planlet(graph_summary, self.client, allow_search=allow_search)
         proposal.cache_key = cache_key
-        self._persist_planlet(summary, proposal)
+        self._persist_planlet(world_summary, proposal)
         if self.cache is not None and cache_key is not None:
             self.cache.store(
                 cache_key,
@@ -94,8 +106,8 @@ class PlanletService:
                 raw_response=proposal.raw_response,
                 metadata={
                     "domain": "overworld",
-                    "map_id": summary.map_id,
-                    "side": summary.side,
+                    "map_id": world_summary.map_id,
+                    "side": world_summary.side,
                 },
             )
             self._register_planlet(proposal.planlet.get("planlet_id"), cache_key)
@@ -187,3 +199,9 @@ class PlanletService:
             for key, value in config.__dict__.items()
             if key != "api_key"
         }
+
+
+
+
+
+

@@ -27,13 +27,16 @@ from src.overworld.skills import (
     BaseSkill,
     EncounterSkill,
     HealSkill,
+    InteractSkill,
     MenuSkill,
     NavigateSkill,
+    PickupSkill,
     ShopSkill,
     SkillProgress,
     SkillStatus,
     TalkSkill,
     UseItemSkill,
+    WaitSkill,
 )
 from .events import PlanletEvent
 from .plan_monitor import PlanMonitor
@@ -111,6 +114,9 @@ class OverworldExecutor:
         "TalkSkill": TalkSkill,
         "MenuSkill": MenuSkill,
         "UseItemSkill": UseItemSkill,
+        "InteractSkill": InteractSkill,
+        "PickupSkill": PickupSkill,
+        "WaitSkill": WaitSkill,
         "EncounterSkill": EncounterSkill,
     }
 

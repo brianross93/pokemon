@@ -49,6 +49,9 @@ class PlanCompiler:
         "TALK_TO": "TalkSkill",
         "OPEN_MENU": "MenuSkill",
         "USE_ITEM": "UseItemSkill",
+        "INTERACT": "InteractSkill",
+        "PICKUP_ITEM": "PickupSkill",
+        "WAIT": "WaitSkill",
         "HANDLE_ENCOUNTER": "EncounterSkill",
     }
 

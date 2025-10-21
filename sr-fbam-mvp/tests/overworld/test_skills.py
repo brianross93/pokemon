@@ -4,12 +4,15 @@ from src.plan.planner_llm import PlanletSpec
 from src.overworld.graph.overworld_memory import OverworldMemory
 from src.overworld.skills import (
     HealSkill,
+    InteractSkill,
     MenuSkill,
     NavigateSkill,
+    PickupSkill,
     ShopSkill,
     SkillStatus,
     TalkSkill,
     UseItemSkill,
+    WaitSkill,
 )
 from src.overworld.skills.base import SkillProgress
 
@@ -105,3 +108,44 @@ def test_talk_skill_marks_failure_when_npc_missing():
     progress = skill.progress(memory)
     assert progress.status is SkillStatus.STALLED
     assert progress.reason == "NPC_NOT_FOUND"
+
+
+def test_interact_skill_succeeds_when_flag_set():
+    memory = make_basic_memory()
+    spec = PlanletSpec(id="interact", kind="INTERACT", args={"flag": "DoorOpen"})
+    skill = InteractSkill()
+    skill.on_enter(spec, memory)
+
+    skill.select_action({}, memory)
+    first_progress = skill.progress(memory)
+    assert first_progress.status is SkillStatus.IN_PROGRESS
+
+    memory.write(OverworldMemory.make_flag("DoorOpen", name="DoorOpen", value=True))
+    final_progress = skill.progress(memory)
+    assert final_progress.status is SkillStatus.SUCCEEDED
+
+
+def test_pickup_skill_detects_inventory_delta():
+    memory = make_basic_memory()
+    spec = PlanletSpec(id="pickup", kind="PICKUP_ITEM", args={"item": "Potion"})
+    skill = PickupSkill()
+    skill.on_enter(spec, memory)
+
+    skill.select_action({}, memory)
+    assert skill.progress(memory).status is SkillStatus.IN_PROGRESS
+
+    memory.write(OverworldMemory.make_inventory_item("potion", name="Potion", quantity=1))
+    assert skill.progress(memory).status is SkillStatus.SUCCEEDED
+
+
+def test_wait_skill_completes_after_required_steps():
+    memory = make_basic_memory()
+    spec = PlanletSpec(id="wait", kind="WAIT", args={"steps": 2})
+    skill = WaitSkill()
+    skill.on_enter(spec, memory)
+
+    assert skill.progress(memory).status is SkillStatus.IN_PROGRESS
+    skill.select_action({}, memory)
+    assert skill.progress(memory).status is SkillStatus.IN_PROGRESS
+    skill.select_action({}, memory)
+    assert skill.progress(memory).status is SkillStatus.SUCCEEDED

@@ -32,9 +32,9 @@ class PlanletSpec:
     pre: Sequence[Dict[str, Any]] = field(default_factory=list)
     post: Sequence[Dict[str, Any]] = field(default_factory=list)
     hints: Dict[str, Any] = field(default_factory=dict)
+    script: List[Dict[str, Any]] = field(default_factory=list)
     timeout_steps: int = 600
     recovery: Sequence[Dict[str, Any]] = field(default_factory=list)
-
 
 @dataclass(frozen=True)
 class PlanBundle:
@@ -117,6 +117,7 @@ def validate_plan_bundle(data: Mapping[str, Any]) -> PlanBundle:
                 pre=list(planlet.get("pre") or []),
                 post=list(planlet.get("post") or []),
                 hints=dict(planlet.get("hints") or {}),
+                script=list(planlet.get("script") or []),
                 timeout_steps=int(planlet.get("timeout_steps", 600)),
                 recovery=list(planlet.get("recovery") or []),
             )
@@ -158,3 +159,5 @@ def format_validation_errors(errors: Iterable[str]) -> str:
 
     lines = [f"- {error}" for error in errors]
     return "\n".join(lines)
+
+

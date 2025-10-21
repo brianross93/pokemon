@@ -1,4 +1,4 @@
-﻿"""
+"""
 Task wrapper that pairs the SR-FBAM core with battle-specific components.
 """
 from __future__ import annotations
@@ -13,6 +13,8 @@ from srfbam.core import EncodedFrame, SRFBAMCore, SrfbamStepSummary
 from src.pkmn_battle.env import BattleObs, EnvAdapter, LegalAction
 from src.pkmn_battle.extractor import Extractor
 from src.pkmn_battle.graph import GraphMemory, WriteOp
+from src.pkmn_battle.plan.interpreter import BattlePlanExecutor, PlanDecision
+from src.plan.planner_llm import PlanletSpec
 from src.pkmn_battle.policy import (
     ActionSpace,
     BattleControllerPolicy,
@@ -230,6 +232,9 @@ class SRFBAMBattleAgent:
         self._plan_source: Optional[str] = None
         self._plan_cache_hit: Optional[bool] = None
         self._plan_metadata: Dict[str, object] = {}
+        self._plan_executor = None
+        self._plan_clear_after_step = False
+        self._last_observation: Optional[BattleObs] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -278,7 +283,7 @@ class SRFBAMBattleAgent:
         self._plan_metadata = {}
 
     def planlet_context(self) -> Dict[str, object]:
-        """Return the current planlet context snapshot."""
+        """Return plan metadata suitable for the JSONL context block."""
 
         planlet_id = self._planlet_id or "NONE"
         planlet_kind = self._planlet_kind or "NONE"
@@ -295,6 +300,124 @@ class SRFBAMBattleAgent:
             context.update(dict(self._plan_metadata))
         return context
 
+    def _maybe_execute_plan(
+        self,
+        obs: BattleObs,
+        legal_actions: Sequence[LegalAction],
+    ) -> Optional[Tuple[LegalAction, BattleGateDecision]]:
+        if self._plan_executor is None:
+            return None
+
+        decision = self._plan_executor.next_action(obs, legal_actions)
+        status = decision.status
+        metadata = {**self._plan_metadata, **dict(decision.metadata)}
+
+        if status == "action" and decision.action is not None:
+            metadata["status"] = "executing"
+            self._plan_metadata = metadata
+            gate = BattleGateDecision(
+                mode=BattleGateMode.PLAN_STEP,
+                reason="plan_step",
+                encode_flag=False,
+                metadata=metadata,
+            )
+            return decision.action, gate
+
+        if status == "complete":
+            metadata["status"] = "completed"
+            self._plan_metadata = metadata
+            self._plan_executor = None
+            self._plan_clear_after_step = True
+            return None
+
+        if status == "abort":
+            metadata["status"] = "aborted"
+            if decision.reason:
+                metadata.setdefault("reason", decision.reason)
+            self._plan_metadata = metadata
+            self._plan_executor = None
+            self._plan_clear_after_step = True
+            return None
+
+        return None
+
+    def planlet_context(self) -> Dict[str, object]:
+        """Return plan metadata suitable for the JSONL context block."""
+
+        planlet_id = self._planlet_id or "NONE"
+        planlet_kind = self._planlet_kind or "NONE"
+        context: Dict[str, object] = {
+            "id": self._plan_id,
+            "planlet_id": planlet_id,
+            "planlet_kind": planlet_kind,
+        }
+        if self._plan_source is not None:
+            context["source"] = self._plan_source
+        if self._plan_cache_hit is not None:
+            context["cache_hit"] = self._plan_cache_hit
+        if self._plan_metadata:
+            context.update(dict(self._plan_metadata))
+        return context
+
+    def load_planlet(
+        self,
+        planlet: PlanletSpec,
+        *,
+        plan_id: Optional[str] = None,
+        source: str = "llm",
+        cache_hit: Optional[bool] = None,
+        cache_key: Optional[str] = None,
+    ) -> bool:
+        """Register a planlet for execution if preconditions hold."""
+
+        if planlet.kind.upper() != "BATTLE":
+            return False
+
+        observation = self._last_observation
+        if observation is None:
+            observation = self.observe()
+
+        executor = BattlePlanExecutor(planlet, plan_id=plan_id)
+        executor.start(observation)
+        if not executor.preconditions_satisfied:
+            rejection_meta = {
+                "status": "rejected",
+                "errors": executor.precondition_errors(),
+            }
+            if cache_key is not None:
+                rejection_meta["cache_key"] = cache_key
+            self.set_planlet_context(
+                plan_id=plan_id,
+                planlet_id=planlet.id,
+                planlet_kind=planlet.kind,
+                source=source,
+                cache_hit=cache_hit,
+                metadata=rejection_meta,
+            )
+            self._plan_executor = None
+            self._plan_clear_after_step = True
+            return False
+
+        metadata = {
+            "status": "active",
+            "step_index": 0,
+            "steps_total": executor.steps_total,
+        }
+        if cache_key is not None:
+            metadata["cache_key"] = cache_key
+
+        self._plan_executor = executor
+        self._plan_clear_after_step = False
+        self.set_planlet_context(
+            plan_id=plan_id,
+            planlet_id=planlet.id,
+            planlet_kind=planlet.kind,
+            source=source,
+            cache_hit=cache_hit,
+            metadata=metadata,
+        )
+        return True
+
     def act(self) -> LegalAction:
         start = time.perf_counter()
         obs = self.observe()
@@ -303,6 +426,17 @@ class SRFBAMBattleAgent:
         self._last_legal = tuple(legal)
         self._last_mask = mask
         self._index_map = index_map
+
+        plan_result = self._maybe_execute_plan(obs, legal)
+        if plan_result is not None:
+            action, gate_decision = plan_result
+            self._last_action = action
+            self._last_gate_decision = gate_decision
+            action_index = self.action_space.to_index(action)
+            self.core.set_last_action_index(action_index)
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self._update_metrics(gate_decision, latency_ms)
+            return action
 
         action, gate_decision = self.policy_fn(
             obs,
@@ -350,6 +484,7 @@ class SRFBAMBattleAgent:
     # ------------------------------------------------------------------ #
 
     def _process_observation(self, obs: BattleObs) -> None:
+        self._last_observation = obs
         writes = list(self.extractor.extract(obs))
         for op in writes:
             self.graph.write(op)
@@ -504,6 +639,15 @@ class SRFBAMBattleAgent:
                 "avg_ms": total / count if count > 0 else 0.0,
             }
         return profile
+
+
+
+
+
+
+
+
+
 
 
 
