@@ -84,7 +84,7 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
 - [ ] [new] Waypoint mini-graph planner for overworld navigation
   - Publish `docs/graphs/SCHEMA.md` with node/edge schema (encounter, resources, costs).
   - Ship `scripts/build_overworld_graph.py` to derive zone graphs from `data/overworld/static_entities.json`.
-  - Implement `overworld/planning/a_star.py` + `policy.py` (α/β/γ/δ objective) returning ≤8 waypoint planlets.
+  - Implement `overworld/planning/a_star.py` + `policy.py` (alpha/beta/gamma/delta objective) returning <=8 waypoint planlets.
   - Extend executor/telemetry to tag edges (`edge_id`, expected vs actual encounters, resume_ok) for feature store ingestion.
 - [ ] [new] Ablations: no-plan vs plan features; text masked; gate frozen vs trainable; overworld-only gate freeze
   - Stand up experiment grid in `configs/ablations/`; ensure shared eval notebook ingests new runs.
