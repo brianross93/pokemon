@@ -86,6 +86,39 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional path to write JSON metrics (accuracy, loss).",
     )
+    parser.add_argument(
+        "--load-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional checkpoint to load before training (expects torch.save payload with 'model_state').",
+    )
+    parser.add_argument(
+        "--preplan-checkpoint-out",
+        type=Path,
+        default=None,
+        help="If provided, writes model weights before training for calibration baselines.",
+    )
+    parser.add_argument(
+        "--postplan-checkpoint-out",
+        type=Path,
+        default=None,
+        help="If provided, writes model weights after training for calibration comparisons.",
+    )
+    parser.add_argument(
+        "--freeze-backbone",
+        action="store_true",
+        help="Freeze frame encoder (flatten + MLP backbone) to isolate gate head adjustments.",
+    )
+    parser.add_argument(
+        "--freeze-action-head",
+        action="store_true",
+        help="Freeze action classification head when calibrating gates only.",
+    )
+    parser.add_argument(
+        "--freeze-gate-head",
+        action="store_true",
+        help="Freeze gate classification head when focusing on the action policy.",
+    )
     return parser.parse_args()
 
 
@@ -123,9 +156,40 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         plan_feature_dim=train_dataset.plan_feature_dim,
     ).to(device)
+    if args.load_checkpoint:
+        logging.info("Loading checkpoint from %s", args.load_checkpoint)
+        checkpoint = torch.load(args.load_checkpoint, map_location=device)
+        state_dict = checkpoint.get("model_state") if isinstance(checkpoint, dict) else checkpoint
+        model.load_state_dict(state_dict, strict=False)
+
+    _configure_trainability(model, args)
+
+    if args.preplan_checkpoint_out:
+        _save_checkpoint(
+            args.preplan_checkpoint_out,
+            model,
+            {
+                "stage": "preplan",
+                "train_path": str(args.train),
+                "val_path": str(args.val) if args.val else None,
+                "num_actions": train_dataset.num_actions,
+                "gate_classes": train_dataset.num_gate_targets,
+                "plan_feature_dim": train_dataset.plan_feature_dim,
+            },
+        )
+        logging.info("Wrote pre-plan checkpoint to %s", args.preplan_checkpoint_out)
+
+    trainable_param_count = _trainable_parameter_count(model)
+    if trainable_param_count == 0:
+        logging.warning("No trainable parameters remain after freezing; optimizer steps will be skipped.")
+    else:
+        logging.info("Trainable parameters: %d", trainable_param_count)
+
     action_criterion = nn.CrossEntropyLoss()
     gate_criterion = nn.CrossEntropyLoss(reduction="none")
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(
+        (param for param in model.parameters() if param.requires_grad), lr=args.lr
+    )
 
     logging.info(
         "Training on %d decisions (%d actions) for %d epochs",
@@ -181,6 +245,21 @@ def main() -> None:
             )
             best_val_acc = max(best_val_acc, val_metrics["action_acc"])
 
+    if args.postplan_checkpoint_out:
+        _save_checkpoint(
+            args.postplan_checkpoint_out,
+            model,
+            {
+                "stage": "postplan",
+                "train_path": str(args.train),
+                "val_path": str(args.val) if args.val else None,
+                "num_actions": train_dataset.num_actions,
+                "gate_classes": train_dataset.num_gate_targets,
+                "plan_feature_dim": train_dataset.plan_feature_dim,
+            },
+        )
+        logging.info("Wrote post-plan checkpoint to %s", args.postplan_checkpoint_out)
+
     if args.metrics_out:
         payload = {
             "train_path": str(args.train),
@@ -197,6 +276,10 @@ def main() -> None:
             "best_val_accuracy": best_val_acc,
             "last_train_action_loss": last_train_metrics["action_loss"],
             "last_train_gate_loss": last_train_metrics["gate_loss"],
+            "trainable_parameters": trainable_param_count,
+            "freeze_backbone": bool(args.freeze_backbone),
+            "freeze_action_head": bool(args.freeze_action_head),
+            "freeze_gate_head": bool(args.freeze_gate_head),
         }
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(json.dumps(payload, indent=2))
@@ -259,6 +342,36 @@ def run_epoch(
         "gate_loss": total_gate_loss / denom,
         "gate_acc": gate_correct / denom,
     }
+
+
+def _configure_trainability(model: BattlePolicyMLP, args: argparse.Namespace) -> None:
+    if getattr(args, "freeze_backbone", False):
+        logging.info("Freezing backbone parameters for calibration.")
+        for module in (model.flatten, model.backbone):
+            for param in module.parameters():
+                param.requires_grad = False
+    if getattr(args, "freeze_action_head", False):
+        logging.info("Freezing action head parameters.")
+        for param in model.action_head.parameters():
+            param.requires_grad = False
+    if getattr(args, "freeze_gate_head", False):
+        logging.info("Freezing gate head parameters.")
+        for param in model.gate_head.parameters():
+            param.requires_grad = False
+
+
+def _save_checkpoint(path: Path, model: BattlePolicyMLP, metadata: Dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model_state": model.state_dict(),
+        "metadata": metadata,
+        "model_class": model.__class__.__name__,
+    }
+    torch.save(payload, path)
+
+
+def _trainable_parameter_count(model: nn.Module) -> int:
+    return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
 if __name__ == "__main__":

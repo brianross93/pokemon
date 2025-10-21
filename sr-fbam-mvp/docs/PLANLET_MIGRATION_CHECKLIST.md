@@ -63,39 +63,39 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
   - Validate sampler weights with 70/30 battle/overworld split; document knobs in `README_plan_training.md`.
 - [x] Implement plan-conditioned controller training loop (dual-mode batches, gate supervision, teacher forcing)
 - [ ] Calibrate gate heads + scheduler (freeze/unfreeze plan gates, distillation losses, telemetry)
-  - Establish baseline checkpoints (pre-plan, post-plan) for calibration; freeze encoder to isolate gate shifts.
-  - Sweep scheduler configs (linear, cosine, step) in `configs/schedules/`; chart gate accuracy vs adherence.
-  - Add telemetry hooks to emit per-gate calibration stats to W&B dashboard.
+  - [x] Establish baseline checkpoints (pre-plan, post-plan) for calibration; freeze encoder to isolate gate shifts.
+  - [ ] Sweep scheduler configs (linear, cosine, step) in `configs/schedules/`; chart gate accuracy vs adherence.
+  - [ ] Add telemetry hooks to emit per-gate calibration stats to W&B dashboard.
 - [ ] Set up self-distillation loop (LLM-on -> relabel -> retrain -> LLM-off) with checkpoint automation
-  - Script orchestration in `scripts/self_distill.sh`; integrate with Hydra multi-run for phases.
-  - Ensure relabel step tags planlets with generation metadata + teacher scorecard.
-  - Automate checkpoint promotion / rollback rules; notify infra for storage quota check.
+  - [x] Script orchestration in `scripts/self_distill.sh`; integrate with Hydra multi-run for phases.
+  - [x] Ensure relabel step tags planlets with generation metadata + teacher scorecard.
+  - [ ] Automate checkpoint promotion / rollback rules; notify infra for storage quota check.
 - [x] [new] Ship OverworldDecisionDataset with mode_bit + plan features (trajectory slicing, skill labels)
 - [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout) - blocked on overworld telemetry import
-  - Draft augmentation recipes while telemetry import finishes; stage knobs in `configs/train_plan.yaml`.
-  - Define curriculum schedule (battle-heavy warmup -> balanced mix); document gating heuristics for review.
-  - Add unit smoke covering mixed-mode batch sampler once overworld traces land.
+  - [ ] Draft augmentation recipes while telemetry import finishes; stage knobs in `configs/train_plan.yaml`.
+  - [ ] Define curriculum schedule (battle-heavy warmup -> balanced mix); document gating heuristics for review.
+  - [ ] Add unit smoke covering mixed-mode batch sampler once overworld traces land.
 - [ ] [new] Generate overworld telemetry via PyBoy corridor runs (plan metadata + gate/adherence logs) - harness at `scripts/capture_overworld_telemetry.py`
-  - Lock PyBoy seed set + corridor scripts; capture min 50 high-quality traces per skill.
-  - Extend harness to emit gate/adherence JSONL alongside screenshots for spot checks.
-  - Plumb telemetry upload into feature store job; alert Phase 6 owners when stable.
-  - Use `scripts/debug_overworld_addresses.py` to validate ROM-specific RAM offsets before long captures.
-  - Auto-boot PyBoy past title screen (`PyBoyPokemonAdapter._ensure_bootstrapped`) so captures drop straight into overworld control.
+  - [ ] Lock PyBoy seed set + corridor scripts; capture min 50 high-quality traces per skill.
+  - [ ] Extend harness to emit gate/adherence JSONL alongside screenshots for spot checks.
+  - [ ] Plumb telemetry upload into feature store job; alert Phase 6 owners when stable.
+  - [ ] Use `scripts/debug_overworld_addresses.py` to validate ROM-specific RAM offsets before long captures.
+  - [ ] Auto-boot PyBoy past title screen (`PyBoyPokemonAdapter._ensure_bootstrapped`) so captures drop straight into overworld control.
 - [ ] [new] Waypoint mini-graph planner for overworld navigation
-  - Publish `docs/graphs/SCHEMA.md` with node/edge schema (encounter, resources, costs).
-  - Ship `scripts/build_overworld_graph.py` to derive zone graphs from `data/overworld/static_entities.json`.
-  - Implement `overworld/planning/a_star.py` + `policy.py` (alpha/beta/gamma/delta objective) returning <=8 waypoint planlets.
-  - Extend executor/telemetry to tag edges (`edge_id`, expected vs actual encounters, resume_ok) for feature store ingestion.
+  - [ ] Publish `docs/graphs/SCHEMA.md` with node/edge schema (encounter, resources, costs).
+  - [ ] Ship `scripts/build_overworld_graph.py` to derive zone graphs from `data/overworld/static_entities.json`.
+  - [ ] Implement `overworld/planning/a_star.py` + `policy.py` (alpha/beta/gamma/delta objective) returning <=8 waypoint planlets.
+  - [ ] Extend executor/telemetry to tag edges (`edge_id`, expected vs actual encounters, resume_ok) for feature store ingestion.
 - [ ] [new] Ablations: no-plan vs plan features; text masked; gate frozen vs trainable; overworld-only gate freeze
-  - Stand up experiment grid in `configs/ablations/`; ensure shared eval notebook ingests new runs.
-  - Prioritize no-plan and gate-frozen baselines to validate training signal before longer sweeps.
-  - Track metrics deltas vs. Phase 4 baselines; call out regressions >2% in gate adherence or success.
+  - [ ] Stand up experiment grid in `configs/ablations/`; ensure shared eval notebook ingests new runs.
+  - [ ] Prioritize no-plan and gate-frozen baselines to validate training signal before longer sweeps.
+  - [ ] Track metrics deltas vs. Phase 4 baselines; call out regressions >2% in gate adherence or success.
 
 **Phase 5 Execution Plan**
-- Unlock telemetry capture first (PyBoy runs + feature store plumbing) to unblock curriculum mix + calibration.
-- Kick off calibration sweeps once mixed batches land; monitor dashboards daily for gate drift.
-- Launch self-distillation after calibration stabilizes; ablations run in parallel on spare capacity.
-- Hand off summary + metrics to Phase 6 once success criteria trend positive for two consecutive evals.
+- [ ] Unlock telemetry capture first (PyBoy runs + feature store plumbing) to unblock curriculum mix + calibration.
+- [ ] Kick off calibration sweeps once mixed batches land; monitor dashboards daily for gate drift.
+- [ ] Launch self-distillation after calibration stabilizes; ablations run in parallel on spare capacity.
+- [ ] Hand off summary + metrics to Phase 6 once success criteria trend positive for two consecutive evals.
 
 DoD: Mixed tasks maintain/improve success with >=40% fewer LLM calls; gate mix shows ENCODE down, PLAN_* up.
 
