@@ -13,7 +13,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,17 +23,34 @@ from pkmn_battle.ingest import BattleDecisionDataset
 
 
 class BattlePolicyMLP(nn.Module):
-    def __init__(self, num_actions: int, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        num_actions: int,
+        num_gate_classes: int,
+        hidden_dim: int,
+        plan_feature_dim: int,
+    ) -> None:
         super().__init__()
-        self.model = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(40 * 120, hidden_dim),
+        input_dim = 40 * 120 + plan_feature_dim
+        self.flatten = nn.Flatten()
+        self.backbone = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_actions),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
         )
+        self.action_head = nn.Linear(hidden_dim, num_actions)
+        self.gate_head = nn.Linear(hidden_dim, num_gate_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+    def forward(
+        self, frames: torch.Tensor, plan_features: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        flat_frames = self.flatten(frames)
+        if plan_features.dim() == 1:
+            plan_features = plan_features.unsqueeze(0)
+        x = torch.cat([flat_frames, plan_features], dim=1)
+        shared = self.backbone(x)
+        return self.action_head(shared), self.gate_head(shared)
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--cuda", action="store_true", help="Use CUDA if available.")
     parser.add_argument(
+        "--gate-weight",
+        type=float,
+        default=0.5,
+        help="Contribution of gate loss relative to action loss.",
+    )
+    parser.add_argument(
         "--metrics-out",
         type=Path,
         help="Optional path to write JSON metrics (accuracy, loss).",
@@ -79,28 +102,29 @@ def main() -> None:
         BattleDecisionDataset(args.val) if args.val is not None else None
     )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-    )
-    val_loader = (
-        DataLoader(
-            val_dataset,
+    def _make_loader(ds: Dataset, shuffle: bool) -> DataLoader:
+        return DataLoader(
+            ds,
             batch_size=args.batch_size,
-            shuffle=False,
+            shuffle=shuffle,
             num_workers=args.num_workers,
         )
+
+    train_loader = _make_loader(train_dataset, shuffle=True)
+    val_loader = (
+        _make_loader(val_dataset, shuffle=False)
         if val_dataset is not None
         else None
     )
 
     model = BattlePolicyMLP(
         num_actions=train_dataset.num_actions,
+        num_gate_classes=train_dataset.num_gate_targets,
         hidden_dim=args.hidden_dim,
+        plan_feature_dim=train_dataset.plan_feature_dim,
     ).to(device)
-    criterion = nn.CrossEntropyLoss()
+    action_criterion = nn.CrossEntropyLoss()
+    gate_criterion = nn.CrossEntropyLoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     logging.info(
@@ -111,27 +135,51 @@ def main() -> None:
     )
 
     best_val_acc = 0.0
+    last_train_metrics: Dict[str, float] = {
+        "action_loss": 0.0,
+        "action_acc": 0.0,
+        "gate_loss": 0.0,
+        "gate_acc": 0.0,
+    }
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = run_epoch(
-            model, train_loader, criterion, optimizer, device, train=True
+        last_train_metrics = run_epoch(
+            model=model,
+            loader=train_loader,
+            action_criterion=action_criterion,
+            gate_criterion=gate_criterion,
+            optimizer=optimizer,
+            device=device,
+            gate_weight=args.gate_weight,
+            train=True,
         )
         logging.info(
-            "[epoch %d] train loss %.4f acc %.3f",
+            "[epoch %d] train action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f",
             epoch,
-            train_loss,
-            train_acc,
+            last_train_metrics["action_loss"],
+            last_train_metrics["action_acc"],
+            last_train_metrics["gate_loss"],
+            last_train_metrics["gate_acc"],
         )
         if val_loader:
-            val_loss, val_acc = run_epoch(
-                model, val_loader, criterion, optimizer=None, device=device, train=False
+            val_metrics = run_epoch(
+                model=model,
+                loader=val_loader,
+                action_criterion=action_criterion,
+                gate_criterion=gate_criterion,
+                optimizer=None,
+                device=device,
+                gate_weight=args.gate_weight,
+                train=False,
             )
             logging.info(
-                "[epoch %d] val   loss %.4f acc %.3f",
+                "[epoch %d] val   action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f",
                 epoch,
-                val_loss,
-                val_acc,
+                val_metrics["action_loss"],
+                val_metrics["action_acc"],
+                val_metrics["gate_loss"],
+                val_metrics["gate_acc"],
             )
-            best_val_acc = max(best_val_acc, val_acc)
+            best_val_acc = max(best_val_acc, val_metrics["action_acc"])
 
     if args.metrics_out:
         payload = {
@@ -143,7 +191,12 @@ def main() -> None:
             "batch_size": args.batch_size,
             "lr": args.lr,
             "hidden_dim": args.hidden_dim,
+            "gate_weight": args.gate_weight,
+            "plan_feature_dim": train_dataset.plan_feature_dim,
+            "gate_classes": train_dataset.num_gate_targets,
             "best_val_accuracy": best_val_acc,
+            "last_train_action_loss": last_train_metrics["action_loss"],
+            "last_train_gate_loss": last_train_metrics["gate_loss"],
         }
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(json.dumps(payload, indent=2))
@@ -152,41 +205,60 @@ def main() -> None:
 
 def run_epoch(
     model: nn.Module,
-    loader: DataLoader[Tuple[torch.Tensor, int]],
-    criterion: nn.Module,
+    loader: DataLoader[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    action_criterion: nn.Module,
+    gate_criterion: nn.Module,
     optimizer: Optional[torch.optim.Optimizer],
     device: torch.device,
+    gate_weight: float,
     train: bool,
-) -> Tuple[float, float]:
+) -> Dict[str, float]:
     if train:
         model.train()
     else:
         model.eval()
 
-    total_loss = 0.0
+    total_action_loss = 0.0
+    total_gate_loss = 0.0
     total_examples = 0
-    correct = 0
+    action_correct = 0
+    gate_correct = 0
 
-    for frames, labels in loader:
+    for frames, plan_feats, gate_targets, adherence_flags, labels in loader:
         frames = frames.to(device)
+        plan_feats = plan_feats.to(device)
+        gate_targets = gate_targets.to(device)
+        adherence_flags = adherence_flags.to(device)
         labels = labels.to(device)
 
+        batch_size = frames.size(0)
+
         with torch.set_grad_enabled(train):
-            logits = model(frames)
-            loss = criterion(logits, labels)
+            action_logits, gate_logits = model(frames, plan_feats)
+            action_loss = action_criterion(action_logits, labels)
+            gate_loss_unreduced = gate_criterion(gate_logits, gate_targets)
+            gate_weights = 1.0 + adherence_flags
+            gate_loss = (gate_loss_unreduced * gate_weights).mean()
+            combined_loss = action_loss + gate_weight * gate_loss
 
         if train and optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            combined_loss.backward()
             optimizer.step()
 
-        total_loss += loss.item() * frames.size(0)
-        total_examples += frames.size(0)
-        correct += (logits.argmax(dim=1) == labels).sum().item()
+        total_action_loss += action_loss.item() * batch_size
+        total_gate_loss += gate_loss.item() * batch_size
+        total_examples += batch_size
+        action_correct += (action_logits.argmax(dim=1) == labels).sum().item()
+        gate_correct += (gate_logits.argmax(dim=1) == gate_targets).sum().item()
 
-    average_loss = total_loss / max(1, total_examples)
-    accuracy = correct / max(1, total_examples)
-    return average_loss, accuracy
+    denom = max(1, total_examples)
+    return {
+        "action_loss": total_action_loss / denom,
+        "action_acc": action_correct / denom,
+        "gate_loss": total_gate_loss / denom,
+        "gate_acc": gate_correct / denom,
+    }
 
 
 if __name__ == "__main__":

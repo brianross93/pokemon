@@ -55,11 +55,14 @@ DoD: After a mixed run, data/planlets/planlets.parquet contains both kinds; cach
 DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere codes; battle resumes handled.
 
 ## Phase 5 - Training & Distillation
-- [ ] Extend battle dataset with plan features
-- [ ] Implement plan-conditioned controller training loop
-- [ ] Set up self-distillation (LLM-on -> retrain -> LLM-off)
-- [ ] [new] OverworldDecisionDataset + mode_bit + plan features
-- [ ] [new] Ablations: no-plan vs plan features; text masked; gate frozen vs trainable
+- [x] Extend battle dataset with plan features (per-turn plan embeddings, gate targets, adherence flags)
+- [ ] Materialize plan feature store + sampling weights for mixed-mode batches
+- [x] Implement plan-conditioned controller training loop (dual-mode batches, gate supervision, teacher forcing)
+- [ ] Calibrate gate heads + scheduler (freeze/unfreeze plan gates, distillation losses, telemetry)
+- [ ] Set up self-distillation loop (LLM-on -> relabel -> retrain -> LLM-off) with checkpoint automation
+- [x] [new] Ship OverworldDecisionDataset with mode_bit + plan features (trajectory slicing, skill labels)
+- [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout)
+- [ ] [new] Ablations: no-plan vs plan features; text masked; gate frozen vs trainable; overworld-only gate freeze
 
 DoD: Mixed tasks maintain/improve success with >=40% fewer LLM calls; gate mix shows ENCODE down, PLAN_* up.
 

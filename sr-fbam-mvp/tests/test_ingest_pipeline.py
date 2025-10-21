@@ -2,6 +2,8 @@ import io
 import json
 from pathlib import Path
 
+import torch
+
 import lz4.frame
 
 from pkmn_battle.ingest import (
@@ -11,6 +13,7 @@ from pkmn_battle.ingest import (
     discover_shards,
 )
 from scripts.download_metamon_replays import write_demo_shard
+from plan.features import PLAN_STRUCTURED_DIM
 
 
 def test_discover_shards(tmp_path: Path) -> None:
@@ -180,11 +183,72 @@ def test_convert_universal_state_shard(tmp_path: Path) -> None:
     dataset = BattleDecisionDataset(jsonl_path)
     assert len(dataset) == 3
     assert dataset.num_actions >= 2
-    frames, label = dataset[0]
+    frames, plan_feats, gate_target, adherence_flag, label = dataset[0]
     assert frames.shape == (40, 120)
     assert frames.max() <= 1.0
+    assert plan_feats.shape == (dataset.plan_feature_dim,)
+    # No plan present -> progress zero, remaining one.
+    assert plan_feats[3].item() == 0.0
+    assert plan_feats[4].item() == 1.0
+    # Adherence defaults to zero.
+    assert plan_feats[17].item() == 0.0
+    assert plan_feats[18].item() == 0.0
+    assert plan_feats[19].item() == 0.0
+    # Text embedding section stays zero when no plan tokens available.
+    embedding_slice = plan_feats[PLAN_STRUCTURED_DIM:]
+    assert torch.allclose(embedding_slice, torch.zeros_like(embedding_slice))
+    assert gate_target.item() == 0
+    assert adherence_flag.item() == 0.0
     assert isinstance(label, int)
 
+
+def test_battle_dataset_plan_features(tmp_path: Path) -> None:
+    grid_row = "." * 120
+    record = {
+        "battle_id": "plan-demo",
+        "turn_idx": 3,
+        "frame": {"grid_40x120": [grid_row for _ in range(40)]},
+        "options": {"moves": [], "switches": []},
+        "action_label": {"type": "MOVE", "id": "icebeam", "target": "foe-active", "tera": False},
+        "plan": {
+            "id": "plan-1",
+            "planlet_id": "pl-1",
+            "planlet_kind": "BATTLE",
+            "status": "executing",
+            "step_index": 1,
+            "steps_total": 4,
+            "cache_hit": True,
+            "source": "cache",
+            "plan_confidence": 0.8,
+        },
+        "gate": {
+            "mode": "PLAN_STEP",
+            "confidence": 0.6,
+        },
+        "graph_updates": [],
+        "revealed": {},
+        "log_events": [],
+    }
+    jsonl_path = tmp_path / "plan_battle.jsonl"
+    jsonl_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    dataset = BattleDecisionDataset(jsonl_path)
+    frame, plan_feats, gate_target, adherence_flag, label = dataset[0]
+    assert frame.shape == (40, 120)
+    assert plan_feats.shape == (dataset.plan_feature_dim,)
+    # Plan is active and executing, so first feature should be > 0.
+    assert plan_feats[0].item() == 1.0
+    # Progress is 1/4 -> 0.25
+    assert abs(plan_feats[3].item() - 0.25) < 1e-6
+    # Gate PLAN_STEP feature should be 1 (index 13 in structured block)
+    assert plan_feats[13].item() == 1.0
+    # Gate confidence preserved (index 11)
+    assert abs(plan_feats[11].item() - 0.6) < 1e-6
+    # Gate target should align with PLAN_STEP
+    assert gate_target.item() == 5
+    # No adherence data provided, expect default zero
+    assert adherence_flag.item() == 0.0
+    assert isinstance(label, int)
 
 def _move(
     name: str,

@@ -110,6 +110,14 @@ def _convert_decisions(
         record["graph_updates"] = decision.get("graph_updates", [])
         record["revealed"] = decision.get("revealed", {})
         record["log_events"] = decision.get("log_events", [])
+        if "plan" in decision:
+            record["plan"] = decision.get("plan")
+        if "gate" in decision:
+            record["gate"] = decision.get("gate")
+        if "plan_metrics" in decision:
+            record["plan_metrics"] = decision.get("plan_metrics")
+        if "plan_adherence" in decision:
+            record["plan_adherence"] = decision.get("plan_adherence")
         records.append(record)
 
     return write_jsonl(records, writer)
