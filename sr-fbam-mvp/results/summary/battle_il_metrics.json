@@ -1,0 +1,11 @@
+{
+  "train_path": "data\\processed\\il_gen9ou_train.jsonl",
+  "val_path": "data\\processed\\il_gen9ou_val.jsonl",
+  "num_train": 262,
+  "num_actions": 95,
+  "epochs": 1,
+  "batch_size": 32,
+  "lr": 0.0005,
+  "hidden_dim": 128,
+  "best_val_accuracy": 0.009174311926605505
+}

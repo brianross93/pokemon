@@ -1,0 +1,27 @@
+{
+  "frame": 120,
+  "overworld": {
+    "map": {"id": "Pallet_Town", "name": "Pallet Town"},
+    "player": {"map_id": "Pallet_Town", "tile": [12, 9], "facing": "north"},
+    "tiles": [
+      {"map_id": "Pallet_Town", "x": 12, "y": 9, "passable": true, "terrain": "grass", "special": ""},
+      {"map_id": "Pallet_Town", "x": 12, "y": 10, "passable": true, "terrain": "grass", "special": ""},
+      {"map_id": "Pallet_Town", "x": 13, "y": 9, "passable": false, "terrain": "water", "special": ""}
+    ],
+    "warps": [
+      {"id": "home_door", "src_tile": [11, 9], "dst_map_id": "Pallet_Home", "dst_tile": [5, 3]}
+    ],
+    "npcs": [
+      {"id": "oaks_aide", "name": "Oak's Aide", "map_id": "Pallet_Town", "tile": [11, 9], "role": "guide", "facing": "south"}
+    ],
+    "inventory": [
+      {"id": "potion", "name": "Potion", "qty": 2}
+    ],
+    "flags": [
+      {"id": "CanLeavePallet", "name": "CanLeavePallet", "value": true}
+    ],
+    "menus": [
+      {"id": "main_menu", "path": ["BAG"], "open": false}
+    ]
+  }
+}

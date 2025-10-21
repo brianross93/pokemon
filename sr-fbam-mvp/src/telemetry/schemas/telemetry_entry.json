@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SR-FBAM Telemetry Entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "context", "telemetry"],
+  "properties": {
+    "source": {"type": "string"},
+    "timestamp": {"type": ["number", "string", "null"]},
+    "context": {
+      "type": "object",
+      "required": ["domain"],
+      "additionalProperties": true,
+      "properties": {
+        "domain": {"type": "string", "enum": ["overworld", "battle"]},
+        "status": {"type": ["string", "null"]},
+        "step_index": {"type": ["integer", "null"], "minimum": 0},
+        "plan": {
+          "type": "object",
+          "required": ["id", "planlet_id", "planlet_kind"],
+          "additionalProperties": true,
+          "properties": {
+            "id": {"type": ["string", "null"]},
+            "planlet_id": {"type": ["string", "null"]},
+            "planlet_kind": {"type": ["string", "null"]},
+            "timeout": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "battle": {
+          "type": "object",
+          "required": ["turn", "step"],
+          "additionalProperties": true,
+          "properties": {
+            "turn": {"type": "integer", "minimum": 0},
+            "step": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "observation": {"type": ["object", "null"]},
+    "telemetry": {
+      "type": "object",
+      "required": ["core"],
+      "additionalProperties": true,
+      "properties": {
+        "core": {
+          "type": "object",
+          "required": [
+            "legal_actions",
+            "action",
+            "gate",
+            "fractions",
+            "speedup",
+            "latency_ms",
+            "fallback_required",
+            "hop_trace"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "legal_actions": {
+              "type": "array",
+              "items": {"type": "object"}
+            },
+            "action": {"type": ["object", "null"]},
+            "action_mask": {
+              "type": ["array", "null"],
+              "items": {"type": ["number", "null"]}
+            },
+            "gate": {
+              "type": "object",
+              "required": ["mode", "encode_flag"],
+              "additionalProperties": true,
+              "properties": {
+                "mode": {"type": ["string", "null"]},
+                "encode_flag": {"type": ["boolean", "null"]},
+                "view": {"type": ["string", "null"]},
+                "confidence": {"type": ["number", "null"]},
+                "reason": {"type": ["string", "null"]},
+                "raw": {"type": ["string", "null"]},
+                "stats": {"type": ["object", "null"]}
+              }
+            },
+            "fractions": {
+              "type": "object",
+              "required": ["encode", "query", "skip"],
+              "additionalProperties": false,
+              "properties": {
+                "encode": {"type": "number"},
+                "query": {"type": "number"},
+                "skip": {"type": "number"}
+              }
+            },
+            "speedup": {
+              "type": "object",
+              "required": ["predicted", "observed"],
+              "additionalProperties": false,
+              "properties": {
+                "predicted": {"type": ["number", "null"]},
+                "observed": {"type": ["number", "null"]}
+              }
+            },
+            "latency_ms": {"type": "number"},
+            "fallback_required": {"type": "boolean"},
+            "hop_trace": {
+              "type": "array",
+              "items": {"type": "object"}
+            },
+            "plan": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "planlet_id": {"type": ["string", "null"]},
+                "plan_confidence": {"type": ["number", "null"]},
+                "step_idx": {"type": ["integer", "null"], "minimum": 0},
+                "steps_total": {"type": ["integer", "null"], "minimum": 0},
+                "llm_latency_ms": {"type": ["number", "null"]},
+                "search_latency_ms": {"type": ["number", "null"]},
+                "cache_latency_ms": {"type": ["number", "null"]},
+                "gate_distribution": {
+                  "type": "object",
+                  "additionalProperties": {"type": "number"}
+                },
+                "adherence": {"type": ["number", "null"]},
+                "notes": {"type": ["string", "null"]}
+              }
+            }
+          }
+        },
+        "overworld": {
+          "type": "object",
+          "required": ["action_index", "frame_features", "memory", "view_usage", "hybrid"],
+          "additionalProperties": true,
+          "properties": {
+            "action_index": {"type": "integer", "minimum": 0},
+            "frame_features": {
+              "type": "array",
+              "items": {"type": "number"}
+            },
+            "memory": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "view_usage": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "hybrid": {
+              "type": "object",
+              "required": ["projected", "ingested"],
+              "additionalProperties": true,
+              "properties": {
+                "projected": {"type": "integer", "minimum": 0},
+                "ingested": {"type": "integer", "minimum": 0}
+              }
+            },
+            "encounter": {
+              "type": "array",
+              "items": {"type": "object"}
+            },
+            "navigate": {"type": "object"},
+            "recovery": {"type": ["object", "null"]},
+            "skill": {"type": ["object", "null"]}
+          }
+        },
+        "battle": {
+          "type": "object",
+          "required": ["writes"],
+          "additionalProperties": true,
+          "properties": {
+            "writes": {
+              "type": "array",
+              "items": {"type": "object"}
+            },
+            "index_map": {"type": "object"},
+            "summary": {"type": ["object", "null"]}
+          }
+        }
+      }
+    }
+  }
+}

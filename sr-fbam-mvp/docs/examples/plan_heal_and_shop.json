@@ -1,0 +1,88 @@
+{
+  "plan_id": "G1",
+  "goal": "Heal at Viridian City Pokémon Center, then buy three Potions.",
+  "planlets": [
+    {
+      "id": "P1",
+      "kind": "NAVIGATE_TO",
+      "args": {
+        "target": {
+          "map": "Viridian_City",
+          "poi": "Pokemon_Center_Door"
+        },
+        "path_hint": "route1_default"
+      },
+      "pre": [
+        {"op": "HAS_FLAG", "name": "CanLeavePallet", "value": true}
+      ],
+      "post": [
+        {"op": "PLAYER_AT", "map": "Viridian_City", "poi": "Pokemon_Center_Door"}
+      ],
+      "timeout_steps": 480,
+      "recovery": [
+        {
+          "on": "RANDOM_BATTLE",
+          "do": "CALL",
+          "planlet": {
+            "kind": "HANDLE_ENCOUNTER",
+            "args": {"mode": "escape_or_fast_fight"}
+          }
+        },
+        {"on": "BLOCKED_PATH", "do": "REPLAN"}
+      ]
+    },
+    {
+      "id": "P2",
+      "kind": "HEAL_AT_CENTER",
+      "pre": [
+        {"op": "PLAYER_AT", "map": "Viridian_City", "poi": "Pokemon_Center_Door"}
+      ],
+      "post": [
+        {"op": "FLAG_EQUALS", "name": "PartyFullyHealed", "value": true}
+      ],
+      "timeout_steps": 180,
+      "recovery": [
+        {"on": "MENU_DESYNC", "do": "REPLAN"}
+      ]
+    },
+    {
+      "id": "P3",
+      "kind": "NAVIGATE_TO",
+      "args": {
+        "target": {
+          "map": "Viridian_City",
+          "poi": "PokeMart_Counter"
+        }
+      },
+      "pre": [
+        {"op": "HAS_FLAG", "name": "PartyFullyHealed", "value": true}
+      ],
+      "post": [
+        {"op": "PLAYER_AT", "map": "Viridian_City", "poi": "PokeMart_Counter"}
+      ],
+      "timeout_steps": 240,
+      "recovery": [
+        {"on": "RANDOM_BATTLE", "do": "CALL", "planlet": {"kind": "HANDLE_ENCOUNTER", "args": {"mode": "escape_or_fast_fight"}}}
+      ]
+    },
+    {
+      "id": "P4",
+      "kind": "BUY_ITEM",
+      "args": {
+        "item": "Potion",
+        "qty": 3
+      },
+      "pre": [
+        {"op": "PLAYER_AT", "map": "Viridian_City", "poi": "PokeMart_Counter"}
+      ],
+      "post": [
+        {"op": "INVENTORY_AT_LEAST", "item": "Potion", "value": 3}
+      ],
+      "timeout_steps": 200,
+      "recovery": [
+        {"on": "MART_OUT_OF_STOCK", "do": "REPLAN"},
+        {"on": "INSUFFICIENT_FUNDS", "do": "ABORT"}
+      ]
+    }
+  ]
+}

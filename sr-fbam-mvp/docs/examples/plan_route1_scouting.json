@@ -1,0 +1,92 @@
+{
+  "plan_id": "G2",
+  "goal": "Scout Route 1 for items, then return to Pallet Town.",
+  "planlets": [
+    {
+      "id": "P1",
+      "kind": "NAVIGATE_TO",
+      "args": {
+        "target": {
+          "map": "Route_1",
+          "tile": [15, 12]
+        }
+      },
+      "pre": [
+        {"op": "PLAYER_AT", "map": "Pallet_Town", "poi": "South_Exit"}
+      ],
+      "post": [
+        {"op": "PLAYER_AT", "map": "Route_1", "tile": [15, 12]}
+      ],
+      "timeout_steps": 360,
+      "recovery": [
+        {
+          "on": "RANDOM_BATTLE",
+          "do": "CALL",
+          "planlet": {
+            "kind": "HANDLE_ENCOUNTER",
+            "args": {"mode": "escape_or_fast_fight"}
+          }
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "kind": "OPEN_MENU",
+      "args": {
+        "path": ["BAG", "ITEMS"]
+      },
+      "pre": [],
+      "post": [
+        {"op": "MENU_OPEN", "path": ["BAG", "ITEMS"], "value": true}
+      ],
+      "timeout_steps": 90,
+      "recovery": [
+        {"on": "MENU_DESYNC", "do": "REPLAN"}
+      ]
+    },
+    {
+      "id": "P3",
+      "kind": "USE_ITEM",
+      "args": {
+        "item": "Town_Map"
+      },
+      "pre": [
+        {"op": "MENU_OPEN", "path": ["BAG", "ITEMS"], "value": true}
+      ],
+      "post": [
+        {"op": "FLAG_EQUALS", "name": "Route1Mapped", "value": true}
+      ],
+      "timeout_steps": 120,
+      "recovery": [
+        {"on": "ITEM_NOT_FOUND", "do": "ABORT"}
+      ]
+    },
+    {
+      "id": "P4",
+      "kind": "NAVIGATE_TO",
+      "args": {
+        "target": {
+          "map": "Pallet_Town",
+          "poi": "South_Exit"
+        }
+      },
+      "pre": [
+        {"op": "FLAG_EQUALS", "name": "Route1Mapped", "value": true}
+      ],
+      "post": [
+        {"op": "PLAYER_AT", "map": "Pallet_Town", "poi": "South_Exit"}
+      ],
+      "timeout_steps": 360,
+      "recovery": [
+        {
+          "on": "RANDOM_BATTLE",
+          "do": "CALL",
+          "planlet": {
+            "kind": "HANDLE_ENCOUNTER",
+            "args": {"mode": "escape_or_fast_fight"}
+          }
+        }
+      ]
+    }
+  ]
+}

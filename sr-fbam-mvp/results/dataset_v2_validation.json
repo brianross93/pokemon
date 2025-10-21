@@ -1,0 +1,30 @@
+{
+  "train_episodes": 281,
+  "eval_episodes": 71,
+  "train_steps": 19959,
+  "eval_steps": 4734,
+  "change_type_counts": {
+    "other": 190,
+    "bugfix": 92,
+    "feature": 51,
+    "docs": 13,
+    "refactor": 6
+  },
+  "repo_counts": {
+    "httpx": 40,
+    "flask": 21,
+    "requests": 32,
+    "django": 39,
+    "click": 32,
+    "pydantic": 36,
+    "rich": 27,
+    "black": 39,
+    "matplotlib": 10,
+    "starlette": 40,
+    "fastapi": 21,
+    "sqlalchemy": 15
+  },
+  "multi_file_pct": 43.18181818181818,
+  "coverage_failures": [],
+  "coverage_failure_pct": 0.0
+}

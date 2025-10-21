@@ -1,0 +1,66 @@
+{
+  "50": {
+    "fbam": {
+      "wall_time_ms_mean": 66.0948659805581,
+      "wall_time_ms_std": 3.750500693920565,
+      "accuracy_mean": 0.8320000000000001,
+      "accuracy_std": 0.1699882348870062
+    },
+    "srfbam": {
+      "wall_time_ms_mean": 13.867020020261407,
+      "wall_time_ms_std": 0.11263685512738243,
+      "accuracy_mean": 0.978,
+      "accuracy_std": 0.013266499161421611
+    },
+    "speedup_mean": 4.767338062131674,
+    "speedup_std": 0.28635962225733497
+  },
+  "100": {
+    "fbam": {
+      "wall_time_ms_mean": 139.1120519908145,
+      "wall_time_ms_std": 13.519296182331912,
+      "accuracy_mean": 0.866,
+      "accuracy_std": 0.07709734106958553
+    },
+    "srfbam": {
+      "wall_time_ms_mean": 28.54770400095731,
+      "wall_time_ms_std": 0.42803611039328626,
+      "accuracy_mean": 0.9613999999999999,
+      "accuracy_std": 0.010537551897855603
+    },
+    "speedup_mean": 4.879702437554746,
+    "speedup_std": 0.5353647923629355
+  },
+  "200": {
+    "fbam": {
+      "wall_time_ms_mean": 261.2640680093318,
+      "wall_time_ms_std": 7.360786957886764,
+      "accuracy_mean": 0.755,
+      "accuracy_std": 0.23370922104187503
+    },
+    "srfbam": {
+      "wall_time_ms_mean": 60.02674400806427,
+      "wall_time_ms_std": 1.566686193903719,
+      "accuracy_mean": 0.9486000000000001,
+      "accuracy_std": 0.02992557434703635
+    },
+    "speedup_mean": 4.353688025360265,
+    "speedup_std": 0.11182938151574087
+  },
+  "1000": {
+    "fbam": {
+      "wall_time_ms_mean": 1288.825211999938,
+      "wall_time_ms_std": 43.503351043001935,
+      "accuracy_mean": 0.4506,
+      "accuracy_std": 0.004800000000000004
+    },
+    "srfbam": {
+      "wall_time_ms_mean": 291.6245519835502,
+      "wall_time_ms_std": 3.088022756374771,
+      "accuracy_mean": 0.87264,
+      "accuracy_std": 0.026259444015439504
+    },
+    "speedup_mean": 4.421175376362541,
+    "speedup_std": 0.1894703171451079
+  }
+}

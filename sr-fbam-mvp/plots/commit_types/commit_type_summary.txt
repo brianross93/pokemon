@@ -1,0 +1,34 @@
+Commit Type Analysis Summary
+==================================================
+
+Bug Fix (bugfix):
+  Episodes: 5
+  Entity reuse: 98.2% +/- 0.6%
+  Speedup: 5.1x +/- 0.4x
+  FBAM: 72ms +/- 8ms, 68% +/- 5%
+  SR-FBAM: 14ms +/- 1ms, 89% +/- 3%
+
+Feature
+Add (feature):
+  Episodes: 4
+  Entity reuse: 96.8% +/- 1.2%
+  Speedup: 5.0x +/- 0.3x
+  FBAM: 95ms +/- 10ms, 58% +/- 8%
+  SR-FBAM: 19ms +/- 2ms, 78% +/- 7%
+
+Refactor (refactor):
+  Episodes: 2
+  Entity reuse: 98.5% +/- 0.5%
+  Speedup: 5.1x +/- 0.2x
+  FBAM: 86ms +/- 6ms, 59% +/- 3%
+  SR-FBAM: 17ms +/- 1ms, 85% +/- 4%
+
+Other (other):
+  Episodes: 29
+  Entity reuse: 98.1% +/- 0.8%
+  Speedup: 5.2x +/- 0.5x
+  FBAM: 84ms +/- 9ms, 62% +/- 6%
+  SR-FBAM: 16ms +/- 1ms, 82% +/- 6%
+
+Key insight: speedup remains consistent across commit types (5.0-5.2x).
+Validates generalization to diverse editing patterns.

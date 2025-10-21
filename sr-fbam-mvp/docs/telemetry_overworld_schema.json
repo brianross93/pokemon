@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SR-FBAM Overworld Telemetry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "planlet_id",
+    "planlet_kind",
+    "gate",
+    "action",
+    "latency_ms",
+    "fallback_required",
+    "hop_trace"
+  ],
+  "properties": {
+    "planlet_id": {"type": "string"},
+    "planlet_kind": {"type": "string"},
+    "gate": {
+      "type": "object",
+      "required": ["op", "encode_flag", "confidence", "reason"],
+      "additionalProperties": true,
+      "properties": {
+        "op": {"type": "string"},
+        "encode_flag": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string"},
+        "label": {"type": "string"},
+        "index": {"type": "integer"},
+        "meta": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "latency_ms": {"type": "number"},
+    "fallback_required": {"type": "boolean"},
+    "hop_trace": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "navigate": {
+      "type": "object",
+      "required": ["target", "path_remaining"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": ["array", "null"],
+          "items": {"type": "integer"},
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "path_remaining": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

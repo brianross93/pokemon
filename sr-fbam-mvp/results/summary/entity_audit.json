@@ -1,0 +1,9 @@
+{
+  "sample_size": 20,
+  "parseable": 11,
+  "fallback_rate": 0.1,
+  "function_precision": 1.0,
+  "function_recall": 1.0,
+  "class_precision": 0.0,
+  "class_recall": 0.0
+}

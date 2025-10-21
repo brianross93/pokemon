@@ -1,0 +1,17 @@
+# Ignore regenerated episode splits
+data/episodes_1*
+data/episodes_2*
+data/episodes_3*
+data/episodes_5*
+data/episodes_1000*
+data
+sr-fbam-mvp/data
+# Ignore raw evaluation outputs (reproducible)
+results/raw/
+
+# Bytecode
+__pycache__/
+*.pyc
+
+.env
+*.env

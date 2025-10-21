@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sr-fbam-mvp"
+version = "0.1.0"
+description = "SR-FBAM prototype components"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "networkx>=3.0",
+    "matplotlib>=3.5",
+    "numpy>=1.24",
+    "faiss-gpu>=1.7.2",
+    "jsonschema>=4.0",
+    "requests>=2.31",
+    "tqdm>=4.66",
+    "datasets>=2.19",
+    "huggingface_hub>=0.21",
+    "lz4>=4.3",
+]
+
+[project.scripts]
+sr-fbam-overworld = "srfbam.cli.overworld_agent:main"
+sr-fbam-battle-il = "training.train_battle_il:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+
+[tool.setuptools.package-dir]
+"" = "src"

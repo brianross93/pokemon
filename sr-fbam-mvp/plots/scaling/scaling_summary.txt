@@ -1,0 +1,25 @@
+SR-FBAM Scaling Results
+==================================================
+
+Episode length experiments:
+    50 frames: 4.77x +/- 0.29x
+    FBAM: 66.1ms +/- 3.8ms, 83.2% +/- 17.0%
+    SR-FBAM: 13.9ms +/- 0.1ms, 97.8% +/- 1.3%
+   100 frames: 4.88x +/- 0.54x
+    FBAM: 139.1ms +/- 13.5ms, 86.6% +/- 7.7%
+    SR-FBAM: 28.5ms +/- 0.4ms, 96.1% +/- 1.1%
+   200 frames: 4.35x +/- 0.11x
+    FBAM: 261.3ms +/- 7.4ms, 75.5% +/- 23.4%
+    SR-FBAM: 60.0ms +/- 1.6ms, 94.9% +/- 3.0%
+   338 frames: 4.18x +/- 0.56x
+    FBAM: 446.5ms +/- 16.8ms, 75.9% +/- 13.8%
+    SR-FBAM: 108.8ms +/- 16.0ms, 98.4% +/- 1.3%
+  1000 frames: 4.42x +/- 0.19x
+    FBAM: 1288.8ms +/- 43.5ms, 45.1% +/- 0.5%
+    SR-FBAM: 291.6ms +/- 3.1ms, 87.3% +/- 2.6%
+
+Average speedup: 4.52x
+
+Scaling coefficients (linear fit):
+  FBAM: 1.28n + 7.2 ms
+  SR-FBAM: 0.29n + 2.1 ms
