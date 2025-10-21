@@ -26,13 +26,14 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 
 
 DEFAULT_ADDRS: Dict[str, int] = {
-    "map_id": 0x0000,
-    "player_x": 0x0000,
-    "player_y": 0x0000,
-    "in_grass": 0x0000,
-    "in_battle": 0x0000,
-    "species_id": 0x0000,
-    "step_counter": 0x0000,
+    # Updated based on RAM-diff analysis - addresses that change during movement
+    "map_id": 0xD35E,  # wCurMap (keep original, test if it changes between areas)
+    "player_x": 0xD13A,  # Found via RAM-diff - shows clear movement pattern
+    "player_y": 0xD122,  # Found via RAM-diff - changes with movement
+    "in_grass": 0xD5B5,  # wGrassCollision bitfield (non-zero when standing in grass)
+    "in_battle": 0xD057,  # wIsInBattle
+    "species_id": 0xD0B5,  # wEnemyMonSpecies
+    "step_counter": 0xD31C,  # wStepCounter
 }
 
 if WindowEvent is not None:
@@ -61,6 +62,7 @@ class PyBoyConfig:
     max_frame_skip: int = 5
     auto_save_slot: Optional[int] = None
     addresses: Dict[str, int] = field(default_factory=lambda: DEFAULT_ADDRS.copy())
+    debug_addresses: bool = False
 
 
 class PyBoyPokemonAdapter(PokemonBlueAdapter):
@@ -84,6 +86,7 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
             cgb=False,
         )
         self.pyboy.set_emulation_speed(config.speed)
+        self._bootstrapped = False
 
     # --------------------------------------------------------------------- #
     # PokemonBlueAdapter API
@@ -94,6 +97,7 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         if self.config.auto_save_slot is not None:
             self.save_state(self.config.auto_save_slot)
         self._tick(120)
+        self._ensure_bootstrapped()
         return self._read_telemetry()
 
     def step(self, action: PokemonAction) -> PokemonTelemetry:
@@ -107,6 +111,7 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
     def load_state(self, slot: int = 0) -> PokemonTelemetry:
         # PyBoy save/load methods
         self._tick(60)
+        self._ensure_bootstrapped()
         return self._read_telemetry()
 
     # ------------------------------------------------------------------ #
@@ -170,6 +175,21 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
             self.pyboy.send_input(release)
         self._tick(2)
 
+    def _ensure_bootstrapped(self) -> None:
+        """
+        Make sure the emulator has advanced past the title screen so telemetry reflects overworld state.
+
+        We only need to run this once per emulator lifetime; subsequent resets would otherwise open the pause menu.
+        """
+        if self._bootstrapped:
+            return
+        # Send START and A pulses to clear intro/title, allowing overworld control.
+        self._press_button("START", 6)
+        self._tick(90)
+        self._press_button("A", 6)
+        self._tick(90)
+        self._bootstrapped = True
+
     def _tick(self, frames: int) -> None:
         for _ in range(frames):
             self.pyboy.tick()
@@ -204,6 +224,17 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         elapsed_ms = self.pyboy.frame_count * (1000.0 / 60.0)
         method = "grass" if in_grass else "overworld"
 
+        extras: Dict[str, int] = {
+            "joy_ignore": int(mem[0xD730]),
+            "menu_state": int(mem[0xD122]),
+            "menu_cursor": int(mem[0xD13A]),
+        }
+        if self.config.debug_addresses:
+            extras["debug_addrs"] = {
+                name: int(mem[offset]) if offset else 0
+                for name, offset in self.config.addresses.items()
+            }
+
         telemetry = PokemonTelemetry(
             area_id=area_id,
             x=player_x,
@@ -214,11 +245,7 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
             step_counter=step_counter,
             elapsed_ms=elapsed_ms,
             method=method,
-            extra={
-                "joy_ignore": int(mem[0xD730]),
-                "menu_state": int(mem[0xD122]),
-                "menu_cursor": int(mem[0xD13A]),
-            },
+            extra=extras,
         )
         return telemetry
 

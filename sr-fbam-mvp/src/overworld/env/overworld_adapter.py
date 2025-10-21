@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from src.middleware.pokemon_adapter import PokemonTelemetry
+
 
 @dataclass
 class OverworldObservation:
@@ -40,7 +42,18 @@ class OverworldAdapter:
         return self._to_observation(raw)
 
     @staticmethod
-    def _to_observation(raw: Dict[str, Any]) -> OverworldObservation:
-        frame = int(raw.get("frame", 0))
-        overworld = dict(raw.get("overworld", {}))
-        return OverworldObservation(frame=frame, overworld=overworld)
+    def _to_observation(raw: PokemonTelemetry) -> OverworldObservation:
+        # Convert PokemonTelemetry to the expected format
+        overworld_data = {
+            "area_id": raw.area_id,
+            "x": raw.x,
+            "y": raw.y,
+            "in_grass": raw.in_grass,
+            "in_battle": raw.in_battle,
+            "encounter_species_id": raw.encounter_species_id,
+            "step_counter": raw.step_counter,
+            "elapsed_ms": raw.elapsed_ms,
+            "method": raw.method,
+            "extra": raw.extra
+        }
+        return OverworldObservation(frame=0, overworld=overworld_data)

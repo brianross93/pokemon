@@ -15,7 +15,7 @@ import argparse
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import sys
 
@@ -24,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.middleware.pokemon_adapter import PokemonAction, PokemonTelemetry
-from src.overworld.env.overworld_adapter import OverworldAdapter
+from src.overworld.env.overworld_adapter import OverworldAdapter, OverworldObservation
 from src.overworld.recording.trace_recorder import OverworldTraceRecorder
 from src.pkmn_overworld.world_graph import WorldGraph
 
@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         default="null",
         help="PyBoy window type (use 'SDL2' for visible window).",
     )
+    parser.add_argument(
+        "--debug-addresses",
+        action="store_true",
+        help="Include raw memory reads for configured addresses in the telemetry output (PyBoy only).",
+    )
     return parser.parse_args()
 
 
@@ -84,18 +89,78 @@ def make_plan_context(run_id: str) -> Mapping[str, object]:
     }
 
 
-def frame_features_from_telemetry(telemetry: PokemonTelemetry, step: int) -> List[float]:
+TelemetryLike = Union[PokemonTelemetry, OverworldObservation, Mapping[str, Any]]
+
+
+def _extract_overworld_fields(
+    telemetry: TelemetryLike,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[int]]:
+    """
+    Normalise different telemetry payloads into overworld data, extra metadata, and an optional frame index.
+    """
+    if isinstance(telemetry, PokemonTelemetry):
+        overworld = {
+            "area_id": telemetry.area_id,
+            "x": telemetry.x,
+            "y": telemetry.y,
+            "in_grass": telemetry.in_grass,
+            "in_battle": telemetry.in_battle,
+            "step_counter": telemetry.step_counter,
+            "method": telemetry.method,
+        }
+        extras = dict(telemetry.extra or {})
+        frame = extras.get("frame")
+        return overworld, extras, frame
+
+    if isinstance(telemetry, OverworldObservation):
+        overworld = dict(telemetry.overworld or {})
+        extras = dict(overworld.get("extra") or {})
+        frame = getattr(telemetry, "frame", None)
+        return overworld, extras, frame
+
+    if isinstance(telemetry, Mapping):
+        mapping = telemetry
+        if "overworld" in mapping:
+            overworld = dict(mapping.get("overworld") or {})
+            extras = dict(overworld.get("extra") or mapping.get("extra") or {})
+        else:
+            overworld = {
+                "area_id": mapping.get("area_id"),
+                "x": mapping.get("x"),
+                "y": mapping.get("y"),
+                "in_grass": mapping.get("in_grass"),
+                "in_battle": mapping.get("in_battle"),
+                "step_counter": mapping.get("step_counter"),
+                "method": mapping.get("method"),
+            }
+            extras = dict(mapping.get("extra") or {})
+        frame = mapping.get("frame")
+        return overworld, extras, frame
+
+    raise TypeError(f"Unsupported telemetry payload: {type(telemetry)!r}")
+
+
+def frame_features_from_telemetry(telemetry: TelemetryLike, step: int) -> List[float]:
     """Very small handcrafted feature vector until the real encoder lands."""
 
+    overworld, extras, _ = _extract_overworld_fields(telemetry)
+    area_id = int(overworld.get("area_id") or 0)
+    x = int(overworld.get("x") or 0)
+    y = int(overworld.get("y") or 0)
+    in_grass = 1.0 if overworld.get("in_grass") else 0.0
+    in_battle = 1.0 if overworld.get("in_battle") else 0.0
+    step_counter = int(overworld.get("step_counter") or 0)
+    time_bucket = str(extras.get("time_bucket") or "")
+
     return [
-        float(telemetry.area_id) / 255.0,
-        float(telemetry.x) / 255.0,
-        float(telemetry.y) / 255.0,
-        1.0 if telemetry.in_grass else 0.0,
-        1.0 if telemetry.in_battle else 0.0,
-        float(telemetry.step_counter % 256) / 255.0,
+        float(area_id) / 255.0,
+        float(x) / 255.0,
+        float(y) / 255.0,
+        in_grass,
+        in_battle,
+        float(step_counter % 256) / 255.0,
         float(step % 128) / 127.0,
-        1.0 if telemetry.extra.get("time_bucket") == "night" else 0.0,
+        1.0 if time_bucket == "night" else 0.0,
     ]
 
 
@@ -121,15 +186,18 @@ def legal_actions_stub() -> List[Mapping[str, object]]:
 
 def build_payload(
     *,
-    telemetry: PokemonTelemetry,
+    telemetry: TelemetryLike,
     step: int,
     action_index: int,
     plan_context: Mapping[str, object],
 ) -> Mapping[str, object]:
     timestamp = datetime.now(timezone.utc).isoformat()
+    overworld, extras, frame = _extract_overworld_fields(telemetry)
     frame_features = frame_features_from_telemetry(telemetry, step)
     gate_payload = core_gate_payload(step)
-    return {
+    frame_value = frame if frame is not None else int(extras.get("frame", step))
+    debug_addrs = extras.get("debug_addrs")
+    payload = {
         "source": "capture.overworld",
         "timestamp": timestamp,
         "context": {
@@ -140,11 +208,11 @@ def build_payload(
             "plan": plan_context,
         },
         "observation": {
-            "frame": telemetry.extra.get("frame", int(step)),
+            "frame": frame_value,
             "overworld": {
-                "area_id": telemetry.area_id,
-                "x": telemetry.x,
-                "y": telemetry.y,
+                "area_id": int(overworld.get("area_id") or 0),
+                "x": int(overworld.get("x") or 0),
+                "y": int(overworld.get("y") or 0),
             },
         },
         "telemetry": {
@@ -172,6 +240,11 @@ def build_payload(
             },
         },
     }
+    if isinstance(debug_addrs, Mapping) and debug_addrs:
+        payload["telemetry"]["overworld"]["debug_addresses"] = {
+            str(name): int(value) for name, value in debug_addrs.items()
+        }
+    return payload
 
 
 def capture_with_pyboy(args: argparse.Namespace) -> Iterable[Mapping[str, object]]:
@@ -181,12 +254,29 @@ def capture_with_pyboy(args: argparse.Namespace) -> Iterable[Mapping[str, object
     cfg = PyBoyConfig(
         rom_path=args.rom,
         window_type=args.window,
+        debug_addresses=args.debug_addresses,
     )
     adapter = PyBoyPokemonAdapter(cfg)
     overworld = OverworldAdapter(adapter)
 
     plan_context = make_plan_context(run_id="pyboy")
     telemetry = overworld.reset()
+    
+    # Initialize game: get past title screen
+    print("Initializing game - getting past title screen...")
+    for _ in range(60):  # Press START to open menu
+        action = PokemonAction("START", {"frames": 6})
+        telemetry = overworld.step(action)
+        if telemetry.overworld.get("area_id", 0) != 0:  # Menu opened
+            break
+    
+    for _ in range(60):  # Press A to select NEW GAME
+        action = PokemonAction("A", {"frames": 6})
+        telemetry = overworld.step(action)
+        if telemetry.overworld.get("area_id", 0) != 0:  # Game started
+            break
+    
+    print("Game initialized - starting telemetry capture...")
     yield build_payload(telemetry=telemetry, step=0, action_index=4, plan_context=plan_context)
 
     for step in range(1, args.steps):
