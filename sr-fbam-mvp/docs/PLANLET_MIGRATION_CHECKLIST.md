@@ -43,14 +43,14 @@ DoD: scripts/request_planlet.py --mode overworld emits a valid planlet; snapshot
 DoD: After a mixed run, data/planlets/planlets.parquet contains both kinds; cache hits reduce LLM calls.
 
 ## Phase 4 - Executor Updates
-- [ ] Add SR-FBAM gates `PLAN_LOOKUP` / `PLAN_STEP`
-- [ ] Map battle plan ops -> legal actions + fallbacks
-- [ ] Runtime precondition checks & graceful abort path
-- [ ] Telemetry: log gate probabilities, plan adherence, fallbacks
+- [x] Add SR-FBAM gates `PLAN_LOOKUP` / `PLAN_STEP`
+- [x] Map battle plan ops -> legal actions + fallbacks
+- [x] Runtime precondition checks & graceful abort path
+- [x] Telemetry: log gate probabilities, plan adherence, fallbacks
 - [x] [new] Overworld skills (navigate, interact, talk, buy, pickup, use_item, menu, wait)
 - [x] [new] Op->Skill registry with unit tests + illegal-state fuzzing
-- [ ] [new] Context switch logic (battle interrupts + resume or revise)
-- [ ] [new] Rule-based confidence gate v0 (pre-learned head)
+- [x] [new] Context switch logic (battle interrupts + resume or revise)
+- [x] [new] Rule-based confidence gate v0 (pre-learned head)
 
 DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere codes; battle resumes handled.
 
