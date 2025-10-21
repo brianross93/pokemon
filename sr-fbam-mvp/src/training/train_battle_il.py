@@ -17,6 +17,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, StepLR
 from torch.utils.data import DataLoader, Dataset
 
 from pkmn_battle.ingest import BattleDecisionDataset
@@ -119,6 +120,68 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Freeze gate classification head when focusing on the action policy.",
     )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="none",
+        choices=("none", "linear", "cosine", "step"),
+        help="Learning-rate scheduler to use during calibration sweeps.",
+    )
+    parser.add_argument(
+        "--scheduler-warmup-epochs",
+        type=int,
+        default=0,
+        help="Warmup epochs for linear scheduler (ignored by other schedulers).",
+    )
+    parser.add_argument(
+        "--scheduler-total-epochs",
+        type=int,
+        default=0,
+        help="Override total epochs seen by scheduler (0 defaults to --epochs).",
+    )
+    parser.add_argument(
+        "--scheduler-step-size",
+        type=int,
+        default=1,
+        help="Step size (epochs) for step scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler-gamma",
+        type=float,
+        default=0.5,
+        help="Gamma factor for step scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler-min-lr",
+        type=float,
+        default=0.0,
+        help="Minimum learning rate for linear/cosine schedulers (absolute value).",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="Weights & Biases project name. When set, metrics are logged to W&B.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Optional W&B run name.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Optional list of W&B tags.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        default=None,
+        help="Optional W&B mode override (e.g., 'offline').",
+    )
     return parser.parse_args()
 
 
@@ -179,17 +242,56 @@ def main() -> None:
         )
         logging.info("Wrote pre-plan checkpoint to %s", args.preplan_checkpoint_out)
 
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
     trainable_param_count = _trainable_parameter_count(model)
     if trainable_param_count == 0:
         logging.warning("No trainable parameters remain after freezing; optimizer steps will be skipped.")
     else:
         logging.info("Trainable parameters: %d", trainable_param_count)
 
+    if not trainable_params:
+        optimizer: Optional[torch.optim.Optimizer] = None
+    else:
+        optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
+
+    if args.scheduler != "none" and optimizer is None:
+        logging.warning("Scheduler '%s' requested but optimizer has no parameters; disabling scheduler.", args.scheduler)
+        scheduler = None
+    elif optimizer is not None:
+        scheduler = _build_scheduler(optimizer, args)
+        if scheduler is not None:
+            logging.info("Scheduler enabled: %s", args.scheduler)
+        else:
+            if args.scheduler != "none":
+                logging.warning("Scheduler '%s' could not be constructed; proceeding without scheduling.", args.scheduler)
+    else:
+        scheduler = None
+
+    wandb_logger = _init_wandb(
+        args,
+        {
+            "train_path": str(args.train),
+            "val_path": str(args.val) if args.val else None,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "hidden_dim": args.hidden_dim,
+            "gate_weight": args.gate_weight,
+            "freeze_backbone": bool(args.freeze_backbone),
+            "freeze_action_head": bool(args.freeze_action_head),
+            "freeze_gate_head": bool(args.freeze_gate_head),
+            "scheduler": args.scheduler,
+            "scheduler_warmup_epochs": args.scheduler_warmup_epochs,
+            "scheduler_total_epochs": args.scheduler_total_epochs if args.scheduler_total_epochs > 0 else args.epochs,
+            "scheduler_step_size": args.scheduler_step_size,
+            "scheduler_gamma": args.scheduler_gamma,
+            "scheduler_min_lr": args.scheduler_min_lr,
+            "trainable_parameters": trainable_param_count,
+        },
+    )
+
     action_criterion = nn.CrossEntropyLoss()
     gate_criterion = nn.CrossEntropyLoss(reduction="none")
-    optimizer = torch.optim.Adam(
-        (param for param in model.parameters() if param.requires_grad), lr=args.lr
-    )
 
     logging.info(
         "Training on %d decisions (%d actions) for %d epochs",
@@ -216,14 +318,17 @@ def main() -> None:
             gate_weight=args.gate_weight,
             train=True,
         )
+        current_lr = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
         logging.info(
-            "[epoch %d] train action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f",
+            "[epoch %d] train action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f lr %.6e",
             epoch,
             last_train_metrics["action_loss"],
             last_train_metrics["action_acc"],
             last_train_metrics["gate_loss"],
             last_train_metrics["gate_acc"],
+            current_lr,
         )
+        val_metrics: Optional[Dict[str, float]] = None
         if val_loader:
             val_metrics = run_epoch(
                 model=model,
@@ -244,6 +349,29 @@ def main() -> None:
                 val_metrics["gate_acc"],
             )
             best_val_acc = max(best_val_acc, val_metrics["action_acc"])
+        if wandb_logger:
+            payload = {
+                "epoch": epoch,
+                "lr": current_lr,
+                "train/action_loss": last_train_metrics["action_loss"],
+                "train/action_acc": last_train_metrics["action_acc"],
+                "train/gate_loss": last_train_metrics["gate_loss"],
+                "train/gate_acc": last_train_metrics["gate_acc"],
+            }
+            if val_metrics is not None:
+                payload.update(
+                    {
+                        "val/action_loss": val_metrics["action_loss"],
+                        "val/action_acc": val_metrics["action_acc"],
+                        "val/gate_loss": val_metrics["gate_loss"],
+                        "val/gate_acc": val_metrics["gate_acc"],
+                    }
+                )
+            wandb_logger.log(payload, step=epoch)
+        if scheduler is not None:
+            scheduler.step()
+
+    final_lr = optimizer.param_groups[0]["lr"] if optimizer is not None else None
 
     if args.postplan_checkpoint_out:
         _save_checkpoint(
@@ -259,6 +387,11 @@ def main() -> None:
             },
         )
         logging.info("Wrote post-plan checkpoint to %s", args.postplan_checkpoint_out)
+
+    wandb_run_id = None
+    if wandb_logger:
+        run = getattr(wandb_logger, "run", None)
+        wandb_run_id = getattr(run, "id", None)
 
     if args.metrics_out:
         payload = {
@@ -280,10 +413,24 @@ def main() -> None:
             "freeze_backbone": bool(args.freeze_backbone),
             "freeze_action_head": bool(args.freeze_action_head),
             "freeze_gate_head": bool(args.freeze_gate_head),
+            "scheduler": args.scheduler,
+            "scheduler_warmup_epochs": args.scheduler_warmup_epochs,
+            "scheduler_total_epochs": args.scheduler_total_epochs if args.scheduler_total_epochs > 0 else args.epochs,
+            "scheduler_step_size": args.scheduler_step_size,
+            "scheduler_gamma": args.scheduler_gamma,
+            "scheduler_min_lr": args.scheduler_min_lr,
+            "scheduler_enabled": bool(scheduler),
+            "final_lr": final_lr,
+            "wandb_project": args.wandb_project,
+            "wandb_run_id": wandb_run_id,
+            "wandb_mode": args.wandb_mode,
         }
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(json.dumps(payload, indent=2))
         logging.info("Metrics written to %s", args.metrics_out)
+
+    if wandb_logger:
+        wandb_logger.finish()
 
 
 def run_epoch(
@@ -342,6 +489,73 @@ def run_epoch(
         "gate_loss": total_gate_loss / denom,
         "gate_acc": gate_correct / denom,
     }
+
+
+def _build_scheduler(optimizer: torch.optim.Optimizer, args: argparse.Namespace):
+    schedule = (args.scheduler or "none").lower()
+    if schedule == "none":
+        return None
+
+    total_epochs = args.scheduler_total_epochs if args.scheduler_total_epochs > 0 else args.epochs
+    if total_epochs <= 0:
+        logging.warning("Scheduler requested but total epochs is <= 0; skipping scheduler.")
+        return None
+
+    if schedule == "linear":
+        warmup = max(0, args.scheduler_warmup_epochs)
+        base_lr = max(args.lr, 1e-12)
+        min_lr = max(0.0, args.scheduler_min_lr)
+        min_ratio = min(min_lr / base_lr, 1.0)
+
+        if warmup >= total_epochs:
+            warmup = max(total_epochs - 1, 0)
+
+        def lr_lambda(epoch_index: int) -> float:
+            step = epoch_index + 1
+            if warmup > 0 and step <= warmup:
+                return 1.0
+            progress_steps = max(total_epochs - warmup, 1)
+            progress = min(1.0, (step - warmup) / progress_steps)
+            return (1.0 - progress) * (1.0 - min_ratio) + min_ratio
+
+        return LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    if schedule == "cosine":
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, total_epochs),
+            eta_min=max(0.0, args.scheduler_min_lr),
+        )
+
+    if schedule == "step":
+        step_size = max(1, args.scheduler_step_size)
+        gamma = args.scheduler_gamma
+        return StepLR(optimizer, step_size=step_size, gamma=gamma)
+
+    logging.warning("Unknown scheduler '%s'; disabling scheduler.", schedule)
+    return None
+
+
+def _init_wandb(args: argparse.Namespace, config: Dict[str, object]):
+    project = getattr(args, "wandb_project", None)
+    if not project:
+        return None
+    try:
+        import wandb  # type: ignore
+    except ImportError:
+        logging.error("W&B logging requested but the 'wandb' package is not installed.")
+        return None
+
+    init_kwargs = {"project": project, "config": config}
+    if args.wandb_run_name:
+        init_kwargs["name"] = args.wandb_run_name
+    if args.wandb_tags:
+        init_kwargs["tags"] = args.wandb_tags
+    if args.wandb_mode:
+        init_kwargs["mode"] = args.wandb_mode
+
+    wandb.init(**init_kwargs)
+    return wandb
 
 
 def _configure_trainability(model: BattlePolicyMLP, args: argparse.Namespace) -> None:

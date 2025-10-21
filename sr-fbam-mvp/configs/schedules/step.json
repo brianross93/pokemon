@@ -1,0 +1,31 @@
+{
+  "description": "Step decay every two epochs to evaluate gate convergence vs. stable LR segments.",
+  "command": [
+    "python",
+    "-m",
+    "src.training.train_battle_il",
+    "--train",
+    "<path-to-battle-train.jsonl>",
+    "--val",
+    "<path-to-battle-val.jsonl>",
+    "--epochs",
+    "6",
+    "--batch-size",
+    "64",
+    "--lr",
+    "0.0008",
+    "--freeze-backbone",
+    "--scheduler",
+    "step",
+    "--scheduler-step-size",
+    "2",
+    "--scheduler-gamma",
+    "0.6",
+    "--metrics-out",
+    "results/calibration/step_metrics.json",
+    "--preplan-checkpoint-out",
+    "results/calibration/preplan_step.pt",
+    "--postplan-checkpoint-out",
+    "results/calibration/postplan_step.pt"
+  ]
+}

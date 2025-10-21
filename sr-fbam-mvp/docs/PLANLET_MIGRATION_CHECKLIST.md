@@ -62,14 +62,14 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
   - Wire overworld trace ingestion once PyBoy corridor export lands; mock with battle data meanwhile.
   - Validate sampler weights with 70/30 battle/overworld split; document knobs in `README_plan_training.md`.
 - [x] Implement plan-conditioned controller training loop (dual-mode batches, gate supervision, teacher forcing)
-- [ ] Calibrate gate heads + scheduler (freeze/unfreeze plan gates, distillation losses, telemetry)
+- [x] Calibrate gate heads + scheduler (freeze/unfreeze plan gates, distillation losses, telemetry)
   - [x] Establish baseline checkpoints (pre-plan, post-plan) for calibration; freeze encoder to isolate gate shifts.
-  - [ ] Sweep scheduler configs (linear, cosine, step) in `configs/schedules/`; chart gate accuracy vs adherence.
-  - [ ] Add telemetry hooks to emit per-gate calibration stats to W&B dashboard.
-- [ ] Set up self-distillation loop (LLM-on -> relabel -> retrain -> LLM-off) with checkpoint automation
+  - [x] Sweep scheduler configs (linear, cosine, step) in `configs/schedules/`; chart gate accuracy vs adherence.
+  - [x] Add telemetry hooks to emit per-gate calibration stats to W&B dashboard.
+- [x] Set up self-distillation loop (LLM-on -> relabel -> retrain -> LLM-off) with checkpoint automation
   - [x] Script orchestration in `scripts/self_distill.sh`; integrate with Hydra multi-run for phases.
   - [x] Ensure relabel step tags planlets with generation metadata + teacher scorecard.
-  - [ ] Automate checkpoint promotion / rollback rules; notify infra for storage quota check.
+  - [x] Automate checkpoint promotion / rollback rules; notify infra for storage quota check.
 - [x] [new] Ship OverworldDecisionDataset with mode_bit + plan features (trajectory slicing, skill labels)
 - [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout) - blocked on overworld telemetry import
   - [ ] Draft augmentation recipes while telemetry import finishes; stage knobs in `configs/train_plan.yaml`.

@@ -1,0 +1,33 @@
+{
+  "description": "Freeze backbone, linearly decay LR with warmup while calibrating gate heads.",
+  "command": [
+    "python",
+    "-m",
+    "src.training.train_battle_il",
+    "--train",
+    "<path-to-battle-train.jsonl>",
+    "--val",
+    "<path-to-battle-val.jsonl>",
+    "--epochs",
+    "6",
+    "--batch-size",
+    "64",
+    "--lr",
+    "0.001",
+    "--freeze-backbone",
+    "--scheduler",
+    "linear",
+    "--scheduler-warmup-epochs",
+    "1",
+    "--scheduler-total-epochs",
+    "6",
+    "--scheduler-min-lr",
+    "0.0001",
+    "--metrics-out",
+    "results/calibration/linear_metrics.json",
+    "--preplan-checkpoint-out",
+    "results/calibration/preplan_linear.pt",
+    "--postplan-checkpoint-out",
+    "results/calibration/postplan_linear.pt"
+  ]
+}

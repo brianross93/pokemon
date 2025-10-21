@@ -10,6 +10,9 @@ CONFIG_PATH="configs/self_distill/template.env"
 TEACHER_CHECKPOINT=""
 TEACHER_SCORECARD=""
 RELABEL_TAG_FILE=""
+PROMOTION_TARGET=""
+PROMOTION_RECORD=""
+STORAGE_ALERT_FILE=""
 DRY_RUN=0
 
 usage() {
@@ -23,6 +26,9 @@ Options:
   --teacher-checkpoint PATH   Existing checkpoint used for LLM-on data generation.
   --teacher-scorecard PATH    JSON/CSV scorecard emitted by teacher evaluation.
   --relabel-tag-file PATH     Expected planlet metadata file produced during relabel stage.
+  --promotion-target PATH     Destination path for promoted student checkpoint (optional).
+  --promotion-record PATH     JSON file to log promotion/rollback metadata (default: <run>/metadata/promotion.json).
+  --storage-alert-file PATH   Text file to write storage quota alert (default: <run>/metadata/storage_alert.txt).
   --dry-run                   Print resolved commands without executing them.
   --help                      Show this message.
 
@@ -57,6 +63,18 @@ while [[ $# -gt 0 ]]; do
       RELABEL_TAG_FILE="$2"
       shift 2
       ;;
+    --promotion-target)
+      PROMOTION_TARGET="$2"
+      shift 2
+      ;;
+    --promotion-record)
+      PROMOTION_RECORD="$2"
+      shift 2
+      ;;
+    --storage-alert-file)
+      STORAGE_ALERT_FILE="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift 1
@@ -81,6 +99,13 @@ CHECKPOINT_DIR="$RUN_DIR/checkpoints"
 METADATA_FILE="$META_DIR/metadata.json"
 
 mkdir -p "$LOG_DIR" "$META_DIR" "$ARTIFACT_DIR" "$CHECKPOINT_DIR"
+
+if [[ -z "$PROMOTION_RECORD" ]]; then
+  PROMOTION_RECORD="$META_DIR/promotion.json"
+fi
+if [[ -z "$STORAGE_ALERT_FILE" ]]; then
+  STORAGE_ALERT_FILE="$META_DIR/storage_alert.txt"
+fi
 
 if [[ -f "$CONFIG_PATH" ]]; then
   # shellcheck disable=SC1090
@@ -173,6 +198,63 @@ with open(output_path, "w", encoding="utf-8") as fout:
 PY "$tag_path" "$scorecard" "$output_path" "$TEACHER_CHECKPOINT"
 }
 
+promote_checkpoint() {
+  local source_checkpoint="$1"
+  local dest_checkpoint="$2"
+  local record_path="$3"
+  local storage_note="$4"
+  if [[ -z "$dest_checkpoint" ]]; then
+    return
+  fi
+  if [[ -z "$source_checkpoint" ]]; then
+    echo "[promote] No student checkpoint available; skipping promotion." >&2
+    return
+  fi
+  if [[ ! -f "$source_checkpoint" ]]; then
+    echo "[promote] Checkpoint $source_checkpoint not found; skipping promotion." >&2
+    return
+  fi
+  mkdir -p "$(dirname "$dest_checkpoint")"
+  local backup_path=""
+  if [[ -f "$dest_checkpoint" ]]; then
+    backup_path="${dest_checkpoint}.bak.${RUN_ID}"
+    cp "$dest_checkpoint" "$backup_path"
+  fi
+  cp "$source_checkpoint" "$dest_checkpoint"
+  python - <<'PY'
+import json, os, sys, time
+record_path, run_id, source, dest, backup = sys.argv[1:6]
+payload = {
+    "run_id": run_id,
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "promoted_from": source,
+    "promoted_to": dest,
+    "backup": backup or None,
+}
+if record_path:
+    os.makedirs(os.path.dirname(record_path), exist_ok=True)
+    with open(record_path, "w", encoding="utf-8") as fout:
+        json.dump(payload, fout, indent=2)
+PY "$record_path" "$RUN_ID" "$source_checkpoint" "$dest_checkpoint" "$backup_path"
+  if [[ -n "$storage_note" ]]; then
+    python - <<'PY'
+import os, sys
+note_path, source, dest = sys.argv[1:4]
+size_bytes = os.path.getsize(dest) if os.path.exists(dest) else 0
+os.makedirs(os.path.dirname(note_path), exist_ok=True)
+with open(note_path, "w", encoding="utf-8") as fout:
+    fout.write(
+        f"Run promotion completed.\nSource: {source}\nTarget: {dest}\nSize(bytes): {size_bytes}\n"
+        "Notify infra to verify storage quota and prune stale checkpoints if needed.\n"
+    )
+PY "$storage_note" "$source_checkpoint" "$dest_checkpoint"
+  fi
+  if [[ -n "$backup_path" ]]; then
+    echo "[promote] Previous checkpoint backed up at $backup_path"
+  fi
+  echo "[promote] Promoted $source_checkpoint -> $dest_checkpoint"
+}
+
 run_stage() {
   local stage="$1"
   local command="$2"
@@ -221,6 +303,21 @@ run_stage "llm_on" "$LLM_ON_CMD"
 run_stage "relabel" "$RELABEL_CMD"
 run_stage "retrain" "$RETRAIN_CMD"
 run_stage "llm_off" "$LLM_OFF_CMD"
+
+STUDENT_CHECKPOINT="$(python - <<'PY'
+import json, sys
+metadata_path = sys.argv[1]
+try:
+    with open(metadata_path, "r", encoding="utf-8") as fin:
+        data = json.load(fin)
+except FileNotFoundError:
+    data = {}
+print(data.get("student_checkpoint", "") or "")
+PY "$METADATA_FILE")"
+
+if [[ -n "$PROMOTION_TARGET" ]]; then
+  promote_checkpoint "$STUDENT_CHECKPOINT" "$PROMOTION_TARGET" "$PROMOTION_RECORD" "$STORAGE_ALERT_FILE"
+fi
 
 python - <<'PY'
 import json, sys, time
