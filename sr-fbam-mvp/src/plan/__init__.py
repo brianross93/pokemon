@@ -13,6 +13,8 @@ from .planner_llm import (
 )
 from .compiler import CompiledPlan, CompiledPlanlet, PlanCompiler, PlanCompilationError
 from .prompt_builder import PlannerPrompt, PlannerPromptBuilder
+from .storage import PlanletRecord, PlanletStore
+from .cache import PlanCache, CacheHit, make_battle_cache_key, make_overworld_cache_key
 
 __all__ = [
     "PlanBundle",
@@ -28,4 +30,10 @@ __all__ = [
     "format_validation_errors",
     "PlannerPromptBuilder",
     "PlannerPrompt",
+    "PlanletRecord",
+    "PlanletStore",
+    "PlanCache",
+    "CacheHit",
+    "make_battle_cache_key",
+    "make_overworld_cache_key",
 ]

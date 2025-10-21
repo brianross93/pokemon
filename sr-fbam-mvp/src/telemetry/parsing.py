@@ -26,7 +26,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
 
+from .schema import make_validator
+
 JsonDict = Dict[str, object]
+
+_VALIDATOR = make_validator()
 
 
 def iter_entries(path: Path | str) -> Iterator[JsonDict]:
@@ -68,12 +72,15 @@ def normalize_entry(entry: Mapping[str, object]) -> JsonDict:
     """
 
     if _looks_like_new_schema(entry):
-        return _normalize_new_schema(entry)
-    if _looks_like_legacy_battle(entry):
-        return _normalize_legacy_battle(entry)
-    if _looks_like_legacy_overworld(entry):
-        return _normalize_legacy_overworld(entry)
-    raise ValueError("Unrecognised telemetry payload shape")
+        result = _normalize_new_schema(entry)
+    elif _looks_like_legacy_battle(entry):
+        result = _normalize_legacy_battle(entry)
+    elif _looks_like_legacy_overworld(entry):
+        result = _normalize_legacy_overworld(entry)
+    else:
+        raise ValueError("Unrecognised telemetry payload shape")
+    _VALIDATOR.validate(result)
+    return result
 
 
 # ---------------------------------------------------------------------------

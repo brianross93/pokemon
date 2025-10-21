@@ -28,6 +28,7 @@ def test_planlet_proposer_stub_validates_schema():
     proposal = proposer.propose_stub(summary)
 
     assert proposal.planlet["planlet_id"] == "stub_4"
+    assert proposal.planlet["kind"] in {"BATTLE", "OVERWORLD"}
     assert proposal.planlet["side"] == "p1"
     assert proposal.planlet["script"]
     assert proposal.search_calls == 0
@@ -41,6 +42,7 @@ def test_generate_planlet_uses_llm_and_validates():
 
     planlet_response = {
         "planlet_id": "pl_001",
+        "kind": "BATTLE",
         "seed_frame_id": 8,
         "format": "gen9ou",
         "side": "p2",

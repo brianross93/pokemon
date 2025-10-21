@@ -112,14 +112,21 @@ class BattleControllerPolicy:
             action = {"kind": "forfeit", "index": 0, "meta": {"reason": "no-legal-action"}}
 
         gate_mode = summary.gate_stats.get("decision", "WRITE")
-        if gate_mode == "EXTRACT":
+        gate_mode_upper = str(gate_mode).upper()
+        if gate_mode_upper == "EXTRACT":
             mode = BattleGateMode.HALT
             encode_flag = True
-        elif gate_mode == "CACHE_HIT":
+        elif gate_mode_upper == "CACHE_HIT":
             mode = BattleGateMode.ASSOC
             encode_flag = False
-        elif gate_mode == "REUSE":
+        elif gate_mode_upper == "REUSE":
             mode = BattleGateMode.FOLLOW
+            encode_flag = False
+        elif gate_mode_upper == BattleGateMode.PLAN_LOOKUP.value:
+            mode = BattleGateMode.PLAN_LOOKUP
+            encode_flag = False
+        elif gate_mode_upper == BattleGateMode.PLAN_STEP.value:
+            mode = BattleGateMode.PLAN_STEP
             encode_flag = False
         else:
             mode = BattleGateMode.WRITE

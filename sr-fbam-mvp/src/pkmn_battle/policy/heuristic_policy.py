@@ -20,6 +20,8 @@ class BattleGateMode(str, Enum):
     ASSOC = "ASSOC"
     FOLLOW = "FOLLOW"
     HALT = "HALT"
+    PLAN_LOOKUP = "PLAN_LOOKUP"
+    PLAN_STEP = "PLAN_STEP"
 
 
 @dataclass

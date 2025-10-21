@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from jsonschema import Draft7Validator
 
@@ -34,7 +34,12 @@ class PlanletProposal:
     planlet: Dict[str, Any]
     summary: GraphSummary
     search_calls: int = 0
-    retrieved_docs: Optional[List[Dict[str, str]]] = None
+    retrieved_docs: Optional[List[Dict[str, Any]]] = None
+    token_usage: Optional[Dict[str, Any]] = None
+    raw_response: Optional[str] = None
+    source: str = "llm"
+    cache_hit: bool = False
+    cache_key: Optional[str] = None
 
 
 class PlanletProposer:
@@ -48,6 +53,7 @@ class PlanletProposer:
     ) -> PlanletProposal:
         planlet = {
             "planlet_id": f"stub_{summary.turn}",
+            "kind": "BATTLE" if summary.format.lower().startswith("gen") else "OVERWORLD",
             "seed_frame_id": summary.turn,
             "format": summary.format,
             "side": summary.side,
@@ -102,7 +108,8 @@ class PlanletProposer:
                     original_tools.tools.append(WEB_SEARCH_TOOL)
 
         raw = client.generate_response(messages)
-        planlet = self._parse_planlet(raw)
+        content, token_usage = self._normalise_llm_output(raw)
+        planlet = self._parse_planlet(content)
         self._validator.validate(planlet)
 
         return PlanletProposal(
@@ -110,6 +117,8 @@ class PlanletProposer:
             summary=summary,
             search_calls=len(planlet.get("retrieved_docs") or []),
             retrieved_docs=planlet.get("retrieved_docs"),
+            token_usage=token_usage,
+            raw_response=content,
         )
 
     def _parse_planlet(self, raw: str) -> Dict[str, Any]:
@@ -117,3 +126,29 @@ class PlanletProposer:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(f"LLM did not return valid JSON: {raw}") from exc
+
+    def _normalise_llm_output(self, raw: Any) -> Tuple[str, Optional[Dict[str, Any]]]:
+        if isinstance(raw, str):
+            return raw, None
+        if isinstance(raw, Mapping):
+            content = raw.get("content")
+            usage = raw.get("usage")
+            return self._stringify_content(content), usage  # type: ignore[arg-type]
+        if hasattr(raw, "content"):
+            content = getattr(raw, "content")
+            usage = getattr(raw, "usage", None)
+            return self._stringify_content(content), usage
+        return self._stringify_content(raw), None
+
+    @staticmethod
+    def _stringify_content(content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, (bytes, bytearray)):
+            return content.decode("utf-8", errors="replace")
+        try:
+            return json.dumps(content)
+        except TypeError:
+            return str(content)

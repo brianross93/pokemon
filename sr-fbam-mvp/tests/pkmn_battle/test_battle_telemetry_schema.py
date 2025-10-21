@@ -44,11 +44,14 @@ def test_battle_telemetry_matches_schema() -> None:
     telemetry = agent.telemetry()
 
     payload = telemetry.to_payload()
+    plan_context = telemetry.plan_context()
+    assert plan_context["planlet_id"] == "NONE"
     record: Dict[str, object] = {
         "source": "sr-fbam.battle.agent",
         "context": {
             "domain": "battle",
             "battle": {"turn": int(obs.get("turn", 0)), "step": 1},
+            "plan": plan_context,
         },
         "observation": obs,
         "telemetry": payload,

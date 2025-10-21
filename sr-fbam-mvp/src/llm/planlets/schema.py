@@ -4,6 +4,7 @@ PLANLET_SCHEMA = {
     "type": "object",
     "required": [
         "planlet_id",
+        "kind",
         "seed_frame_id",
         "format",
         "side",
@@ -12,6 +13,7 @@ PLANLET_SCHEMA = {
     ],
     "properties": {
         "planlet_id": {"type": "string"},
+        "kind": {"enum": ["BATTLE", "OVERWORLD"]},
         "seed_frame_id": {"type": "integer"},
         "format": {"type": "string"},
         "side": {"enum": ["p1", "p2"]},
@@ -28,7 +30,7 @@ PLANLET_SCHEMA = {
                     "op": {"type": "string"},
                     "actor": {"type": "string"},
                     "move": {"type": "string"},
-                    "target": {"type": "string"},
+                    "target": {"oneOf": [{"type": "string"}, {"type": "object"}]},
                     "fallback": {"type": "object"}
                 }
             }

@@ -62,6 +62,7 @@ def summarize_entries(
     plan_search_latency_sum = 0.0
     plan_cache_latency_sum = 0.0
     plan_gate_counts = Counter[str]()
+    plan_kind_counts = Counter[str]()
 
     for entry in entries:
         ctx = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
@@ -192,6 +193,7 @@ def summarize_entries(
             "avg_search_latency_ms": plan_search_latency_sum / plan_steps,
             "avg_cache_latency_ms": plan_cache_latency_sum / plan_steps,
             "gate_distribution": _average_counter(plan_gate_counts, plan_steps),
+            "kind_counts": dict(plan_kind_counts),
         }
 
     return summary

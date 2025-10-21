@@ -9,6 +9,7 @@ should be stored verbatim with telemetry logs.
 ```json
 {
   "planlet_id": "pl_2025-10-21_1234",
+  "kind": "BATTLE",
   "seed_frame_id": 2187,
   "format": "gen9ou",
   "side": "p1",
@@ -85,9 +86,10 @@ Fallback blocks are optional and use the same schema recursively.
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Planlet",
   "type": "object",
-  "required": ["planlet_id", "seed_frame_id", "format", "side", "goal", "script"],
+  "required": ["planlet_id", "kind", "seed_frame_id", "format", "side", "goal", "script"],
   "properties": {
     "planlet_id": {"type": "string"},
+    "kind": {"enum": ["BATTLE", "OVERWORLD"]},
     "seed_frame_id": {"type": "integer"},
     "format": {"type": "string"},
     "side": {"enum": ["p1", "p2"]},
@@ -125,7 +127,7 @@ Fallback blocks are optional and use the same schema recursively.
         "op": {"type": "string"},
         "actor": {"type": "string"},
         "move": {"type": "string"},
-        "target": {"type": "string"},
+        "target": {"oneOf": [{"type": "string"}, {"type": "object"}]},
         "hazard": {"type": "string"},
         "tera_type": {"type": "string"},
         "method": {"type": "string"},

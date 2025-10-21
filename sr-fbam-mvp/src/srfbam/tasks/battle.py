@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from srfbam.core import EncodedFrame, SRFBAMCore, SrfbamStepSummary
 
@@ -51,6 +51,12 @@ class BattleTelemetry:
     speedup: Dict[str, Optional[float]]
     latency_ms: float
     fallback_required: bool
+    plan_id: Optional[str] = None
+    planlet_id: Optional[str] = None
+    planlet_kind: Optional[str] = None
+    plan_source: Optional[str] = None
+    plan_cache_hit: Optional[bool] = None
+    plan_metadata: Dict[str, object] = field(default_factory=dict)
 
     def to_payload(self) -> Dict[str, Dict[str, object]]:
         """Serialise telemetry into the shared schema namespaces."""
@@ -79,7 +85,40 @@ class BattleTelemetry:
             "writes": [_serialize_write_op(op) for op in self.last_writes],
             "index_map": {str(index): dict(action) for index, action in self.index_map.items()},
         }
+        if self.last_summary is not None:
+            battle["summary"] = _serialize_summary(self.last_summary)
+        if self.planlet_id is not None or self.planlet_kind is not None or self.plan_id is not None:
+            plan: Dict[str, object] = {
+                "id": self.plan_id,
+                "planlet_id": self.planlet_id,
+                "planlet_kind": self.planlet_kind,
+            }
+            if self.plan_source is not None:
+                plan["source"] = self.plan_source
+            if self.plan_cache_hit is not None:
+                plan["cache_hit"] = self.plan_cache_hit
+            if self.plan_metadata:
+                plan.update(dict(self.plan_metadata))
+            core["plan"] = plan
         return {"core": core, "battle": battle}
+
+    def plan_context(self) -> Dict[str, object]:
+        """Return plan metadata suitable for the JSONL context block."""
+
+        planlet_id = self.planlet_id or "NONE"
+        planlet_kind = self.planlet_kind or "NONE"
+        context: Dict[str, object] = {
+            "id": self.plan_id,
+            "planlet_id": planlet_id,
+            "planlet_kind": planlet_kind,
+        }
+        if self.plan_source is not None:
+            context["source"] = self.plan_source
+        if self.plan_cache_hit is not None:
+            context["cache_hit"] = self.plan_cache_hit
+        if self.plan_metadata:
+            context.update(dict(self.plan_metadata))
+        return context
 
 
 def _serialize_gate_decision(decision: Optional[BattleGateDecision]) -> Dict[str, object]:
@@ -133,6 +172,16 @@ def _serialize_write_op(op: WriteOp) -> Dict[str, object]:
     return base
 
 
+def _serialize_summary(summary: SrfbamStepSummary) -> Dict[str, object]:
+    """Strip tensors to scalars for telemetry logging."""
+
+    gate_stats = dict(summary.gate_stats)
+    return {
+        "context_key": summary.context_key,
+        "gate": gate_stats,
+    }
+
+
 class SRFBAMBattleAgent:
     """
     Glue code between the shared SR-FBAM core and battle-specific modules.
@@ -175,6 +224,12 @@ class SRFBAMBattleAgent:
         self._reset_metrics()
         self._fallback_required: bool = False
         self._latency_by_gate: Dict[str, Dict[str, float]] = {}
+        self._plan_id: Optional[str] = None
+        self._planlet_id: Optional[str] = None
+        self._planlet_kind: Optional[str] = None
+        self._plan_source: Optional[str] = None
+        self._plan_cache_hit: Optional[bool] = None
+        self._plan_metadata: Dict[str, object] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -184,6 +239,7 @@ class SRFBAMBattleAgent:
         obs = self.env.reset()
         self.core.reset_state()
         self._reset_metrics()
+        self.clear_planlet_context()
         self._process_observation(obs)
         return obs
 
@@ -191,6 +247,53 @@ class SRFBAMBattleAgent:
         obs = self.env.observe()
         self._process_observation(obs)
         return obs
+
+    def set_planlet_context(
+        self,
+        *,
+        plan_id: Optional[str] = None,
+        planlet_id: Optional[str] = None,
+        planlet_kind: Optional[str] = None,
+        source: Optional[str] = None,
+        cache_hit: Optional[bool] = None,
+        metadata: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        """Attach planlet metadata for subsequent telemetry payloads."""
+
+        self._plan_id = plan_id
+        self._planlet_id = planlet_id
+        self._planlet_kind = planlet_kind
+        self._plan_source = source
+        self._plan_cache_hit = cache_hit
+        self._plan_metadata = dict(metadata or {})
+
+    def clear_planlet_context(self) -> None:
+        """Remove any active plan metadata."""
+
+        self._plan_id = None
+        self._planlet_id = None
+        self._planlet_kind = None
+        self._plan_source = None
+        self._plan_cache_hit = None
+        self._plan_metadata = {}
+
+    def planlet_context(self) -> Dict[str, object]:
+        """Return the current planlet context snapshot."""
+
+        planlet_id = self._planlet_id or "NONE"
+        planlet_kind = self._planlet_kind or "NONE"
+        context: Dict[str, object] = {
+            "id": self._plan_id,
+            "planlet_id": planlet_id,
+            "planlet_kind": planlet_kind,
+        }
+        if self._plan_source is not None:
+            context["source"] = self._plan_source
+        if self._plan_cache_hit is not None:
+            context["cache_hit"] = self._plan_cache_hit
+        if self._plan_metadata:
+            context.update(dict(self._plan_metadata))
+        return context
 
     def act(self) -> LegalAction:
         start = time.perf_counter()
@@ -234,6 +337,12 @@ class SRFBAMBattleAgent:
             speedup=dict(self._metrics.get("speedup", {})),
             latency_ms=self._last_latency_ms,
             fallback_required=self._fallback_required,
+            plan_id=self._plan_id,
+            planlet_id=self._planlet_id,
+            planlet_kind=self._planlet_kind,
+            plan_source=self._plan_source,
+            plan_cache_hit=self._plan_cache_hit,
+            plan_metadata=dict(self._plan_metadata),
         )
 
     # ------------------------------------------------------------------ #
@@ -278,6 +387,8 @@ class SRFBAMBattleAgent:
             "write": 0,
             "halt": 0,
             "skip": 0,
+            "plan_lookup": 0,
+            "plan_step": 0,
         }
         self._latency_stats = {"total_ms": 0.0, "steps": 0}
         self._metrics = {
@@ -292,6 +403,8 @@ class SRFBAMBattleAgent:
             "follow": {"total_ms": 0.0, "count": 0},
             "write": {"total_ms": 0.0, "count": 0},
             "skip": {"total_ms": 0.0, "count": 0},
+            "plan_lookup": {"total_ms": 0.0, "count": 0},
+            "plan_step": {"total_ms": 0.0, "count": 0},
         }
 
     def _update_metrics(self, decision: Optional[BattleGateDecision], latency_ms: float) -> None:
@@ -313,6 +426,14 @@ class SRFBAMBattleAgent:
                 self._gate_counts["follow"] += 1
                 self._latency_by_gate["follow"]["total_ms"] += self._last_latency_ms
                 self._latency_by_gate["follow"]["count"] += 1
+            elif decision.mode == BattleGateMode.PLAN_LOOKUP:
+                self._gate_counts["plan_lookup"] += 1
+                self._latency_by_gate["plan_lookup"]["total_ms"] += self._last_latency_ms
+                self._latency_by_gate["plan_lookup"]["count"] += 1
+            elif decision.mode == BattleGateMode.PLAN_STEP:
+                self._gate_counts["plan_step"] += 1
+                self._latency_by_gate["plan_step"]["total_ms"] += self._last_latency_ms
+                self._latency_by_gate["plan_step"]["count"] += 1
             elif decision.mode == BattleGateMode.WRITE:
                 self._gate_counts["write"] += 1
                 self._latency_by_gate["write"]["total_ms"] += self._last_latency_ms
@@ -320,7 +441,13 @@ class SRFBAMBattleAgent:
             elif decision.mode == BattleGateMode.HALT:
                 self._gate_counts["halt"] += 1
 
-            if not decision.encode_flag and decision.mode not in (BattleGateMode.ASSOC, BattleGateMode.FOLLOW):
+            skip_exempt_modes = {
+                BattleGateMode.ASSOC,
+                BattleGateMode.FOLLOW,
+                BattleGateMode.PLAN_LOOKUP,
+                BattleGateMode.PLAN_STEP,
+            }
+            if not decision.encode_flag and decision.mode not in skip_exempt_modes:
                 self._gate_counts["skip"] += 1
                 self._latency_by_gate["skip"]["total_ms"] += self._last_latency_ms
                 self._latency_by_gate["skip"]["count"] += 1
@@ -334,7 +461,9 @@ class SRFBAMBattleAgent:
         follow = self._gate_counts["follow"]
         write = self._gate_counts["write"]
         skip = self._gate_counts["skip"]
-        query = assoc + follow
+        plan_lookup = self._gate_counts["plan_lookup"]
+        plan_step = self._gate_counts["plan_step"]
+        query = assoc + follow + plan_lookup + plan_step
 
         fractions = {"encode": 0.0, "query": 0.0, "skip": 0.0}
         if total > 0:
@@ -351,6 +480,8 @@ class SRFBAMBattleAgent:
             + follow * self.core.config.follow_latency_ms
             + write * self.core.config.write_latency_ms
             + skip * self.core.config.skip_latency_ms
+            + plan_lookup * self.core.config.assoc_latency_ms
+            + plan_step * self.core.config.follow_latency_ms
         )
         predicted = baseline / actual if actual > 1e-6 else None
 

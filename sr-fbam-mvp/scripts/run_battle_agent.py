@@ -173,6 +173,9 @@ def main() -> None:
             p95 = _percentile(latency_history, 0.95)
             hop_count = len(telemetry.hop_trace)
             legal_count = len(telemetry.legal_actions)
+            plan_context = telemetry.plan_context()
+            planlet_id = str(plan_context.get("planlet_id", "NONE"))
+            plan_source = plan_context.get("source", "-")
 
             if step % args.log_interval == 0:
                 print(
@@ -184,16 +187,19 @@ def main() -> None:
                     f"p50={p50:.1f}ms p95={p95:.1f}ms "
                     f"speed(pred/obs)={pred_str}/{obs_str} "
                     f"act={action_desc} legal={legal_count} hops={hop_count} "
+                    f"plan={planlet_id} src={plan_source} "
                     f"fallback={telemetry.fallback_required}"
                 )
 
             payload = telemetry.to_payload()
+            context = {
+                "domain": "battle",
+                "battle": {"turn": int(turn), "step": int(step)},
+                "plan": plan_context,
+            }
             record = {
                 "source": "sr-fbam.battle.agent",
-                "context": {
-                    "domain": "battle",
-                    "battle": {"turn": int(turn), "step": int(step)},
-                },
+                "context": context,
                 "observation": obs,
                 "telemetry": payload,
             }
