@@ -14,6 +14,7 @@ EXPECTED_PLAN_REGISTRY = {
     "BUY_ITEM": "ShopSkill",
     "TALK_TO": "TalkSkill",
     "OPEN_MENU": "MenuSkill",
+    "MENU_SEQUENCE": "MenuSequenceSkill",
     "USE_ITEM": "UseItemSkill",
     "INTERACT": "InteractSkill",
     "PICKUP_ITEM": "PickupSkill",
@@ -51,3 +52,21 @@ def test_plan_compiler_rejects_unknown_kinds_fuzz() -> None:
         )
         with pytest.raises(PlanCompilationError):
             compiler.compile(bundle)
+
+
+def test_plan_compiler_menu_sequence() -> None:
+    compiler = PlanCompiler()
+    bundle = PlanBundle(
+        plan_id="menu_seq",
+        goal="Exit menu",
+        planlets=[
+            PlanletSpec(
+                id="boot",
+                kind="MENU_SEQUENCE",
+                args={"buttons": ["START", "A", "A"]},
+                timeout_steps=60,
+            ),
+        ],
+    )
+    compiled = compiler.compile(bundle)
+    assert compiled.planlets[0].skill == "MenuSequenceSkill"

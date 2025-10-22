@@ -1,4 +1,4 @@
-# SR-FBAM Overworld Migration Plan
+﻿# SR-FBAM Overworld Migration Plan
 
 ## Background
 SR-FBAM already runs reliably inside battle simulations, but overworld execution never joined the same loop. The current repository trains imitation models from Gen 9 battle logs, logs overworld telemetry to JSONL, and ships curriculum updates that only touch the battle trainer. No runtime harness actually keeps PyBoy alive, calls the SR-FBAM gates, and escalates HALT events to the planner or LLM. This plan documents the migration path to a live controller that plays the overworld end-to-end while collecting telemetry online.
@@ -30,14 +30,14 @@ SR-FBAM already runs reliably inside battle simulations, but overworld execution
 
 ### Status Snapshot (Oct 2025)
 - ✅ Controller loop now boots PyBoy, keeps SR-FBAM running, and routes HALT events through the executor’s replan handler.
-- ✅ `run_overworld_controller.py` wires in `PlanletService` (fake/mock/real backends), fallbacks, and logging of plan sources.
+- ✅ `run_overworld_controller.py` wires in `PlanletService` (fake/mock/real backends) and logs plan sources; planner output is required (no fallbacks).
 - ⏳ Still to do: tighten boot automation (`--policy-boot` heuristics), attach live telemetry dashboards, and add runtime recovery playbooks.
 - ⏳ Pending planner work: richer overworld planlet templates, prompt context, and menu/navigation coverage beyond `NAVIGATE_TO`.
 
 ### Milestone 1 — Controller Foundations
 - ✅ Harden `scripts/run_overworld_controller.py`: deterministic boot helpers, signal handling, graceful shutdown.
 - ✅ Executor integration: controller now compiles planlets and reloads them on `PLANLET_COMPLETE`, `PLANLET_STALLED`, or `PLAN_COMPLETE`.
-- ✅ Planner bridge: `PlanCoordinator` routes HALT events to `PlanletService`, with cache/store support and random fallbacks.
+- ✅ Planner bridge: `PlanCoordinator` routes HALT events to `PlanletService`, with cache/store support; planner output is mandatory (no fallbacks).
 - ⏳ Telemetry polish: executor still records per-step traces, but controller-side status dashboards and menu-state audits remain to build.
 - ⏳ Boot automation: expand `_policy_bootstrap` coverage and add seed/config snapshots for reproducible runs.
 - DoD: Script sustains ≥2k steps; telemetry JSONL spans menus + overworld; boot sequence reliable without manual inputs.
@@ -58,8 +58,10 @@ SR-FBAM already runs reliably inside battle simulations, but overworld execution
 - DoD: Dashboards display overworld gate mix, LLM usage, tokens, adherence, and HALT causes from live runs.
 
 ### Milestone 4 — Runtime Reliability
-- Add watchdogs for stuck planlets, ROM reloads, or adapter failures; auto-resume from save states where possible.
-- Capture reproducible seeds/config snapshots alongside telemetry.
+
+- ✅ Run metadata snapshots: `scripts/run_overworld_controller.py --metadata-out` now records seeds, planner config, and environment details next to telemetry logs.
+- ✅ Watchdogs replan via the LLM or reload save-state on stalls; operators should monitor planner failures.
+- ⏳ Document menu plan expectations in the runbook so on-call operators know to request MENU_SEQUENCE planlets when menus are open.
 - Document failure modes and recovery steps in a runbook.
 - DoD: Overnight runs complete with minimal manual intervention; operators can recover from crashes using the runbook.
 
@@ -74,3 +76,4 @@ SR-FBAM already runs reliably inside battle simulations, but overworld execution
 - Documented runbook covering bootstrapping, HALT events, recovery, and telemetry inspection.
 - Dashboards tracking overworld plan performance, LLM reliance, and latency.
 - (Optional) Updated training configs that consume live telemetry once available.
+

@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
-import random
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -95,6 +96,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow planner backend to issue retrieval/search tool calls.",
     )
+    parser.add_argument(
+        "--metadata-out",
+        type=Path,
+        help="Optional JSON file to record run configuration and environment metadata.",
+    )
+    parser.add_argument(
+        "--planlet-watchdog-steps",
+        type=int,
+        default=900,
+        help="Trigger replan if a planlet stays active for N controller steps (0 disables).",
+    )
+    parser.add_argument(
+        "--stall-watchdog-steps",
+        type=int,
+        default=600,
+        help="Reload save-state if overworld step counter stops advancing for N controller steps (0 disables).",
+    )
+    parser.add_argument(
+        "--watchdog-save-slot",
+        type=int,
+        default=None,
+        help="Optional PyBoy save-state slot used by the stall watchdog (requires PyBoy save/load support).",
+    )
     return parser.parse_args()
 
 
@@ -107,59 +131,14 @@ def to_executor_observation(observation, adapter: PyBoyPokemonAdapter) -> Dict[s
     return data
 
 
-class RandomPlanManager:
-    """Simple exploration plan generator that produces NAVIGATE_TO planlets."""
-
-    def __init__(self, rng: random.Random) -> None:
-        self._rng = rng
-        self._counter = 0
-
-    def build_bundle(self, observation: Dict[str, object]) -> PlanBundle:
-        overworld = observation.get("overworld", {}) or {}
-        ram = observation.get("ram", {}) or {}
-
-        map_byte = ram.get(0xD35E) or overworld.get("area_id", 0)
-        map_id = f"{int(map_byte) & 0xFF:02X}"
-
-        player_x = int(overworld.get("x", 0))
-        player_y = int(overworld.get("y", 0))
-        player = overworld.get("player")
-        if isinstance(player, dict):
-            tile = player.get("tile")
-            if isinstance(tile, (list, tuple)) and len(tile) >= 2:
-                player_x = int(tile[0])
-                player_y = int(tile[1])
-
-        dx = self._rng.choice([-3, -2, -1, 0, 1, 2, 3])
-        dy = self._rng.choice([-3, -2, -1, 0, 1, 2, 3])
-        if dx == 0 and dy == 0:
-            dx = 1
-        target = [max(0, min(255, player_x + dx)), max(0, min(255, player_y + dy))]
-
-        planlet_id = f"nav_{self._counter}"
-        planlet = PlanletSpec(
-            id=planlet_id,
-            kind="NAVIGATE_TO",
-            args={"target": {"map": map_id, "tile": target}},
-            timeout_steps=240,
-        )
-        self._counter += 1
-        return PlanBundle(
-            plan_id=f"auto_{int(time.time())}_{self._counter}",
-            goal=f"Explore {map_id} -> {target}",
-            planlets=[planlet],
-        )
-
-
 class PlanCoordinator:
-    """Bridge overworld executor HALTs to planner/LLM requests with random fallback."""
+    """Bridge overworld executor HALTs to planner/LLM requests."""
 
     def __init__(
         self,
         *,
         executor: "OverworldExecutor",
         service: Optional[PlanletService],
-        fallback: RandomPlanManager,
         allow_search: bool,
         nearby_limit: int,
         backend_label: str,
@@ -167,14 +146,13 @@ class PlanCoordinator:
     ) -> None:
         self.executor = executor
         self.service = service
-        self.fallback = fallback
         self.allow_search = bool(allow_search)
         self.nearby_limit = max(1, int(nearby_limit))
         self._backend_label = backend_label
         self._logger = logger
         self._plan_seq = 0
         self._planlet_seq = 0
-        self._last_source = backend_label if service is not None else "random"
+        self._last_source = backend_label if service is not None else "planner-unavailable"
 
     def has_planner(self) -> bool:
         return self.service is not None
@@ -184,29 +162,24 @@ class PlanCoordinator:
 
     def request_bundle(self, observation: Dict[str, object], *, reason: str) -> PlanBundle:
         if self.service is None:
-            return self._fallback_bundle(observation, reason, "planner-disabled")
+            raise RuntimeError("Planner backend not configured; cannot produce planlets.")
         try:
             proposal = self.service.request_overworld_planlet(
                 self.executor.memory,
                 nearby_limit=self.nearby_limit,
                 allow_search=self.allow_search,
             )
-        except Exception:
+        except Exception as exc:
             self._logger.exception("Planlet service failed (reason=%s)", reason)
-            return self._fallback_bundle(observation, reason, "planner-error")
+            raise RuntimeError(f"Planner backend error: {exc}") from exc
         bundle = self._bundle_from_proposal(proposal, reason)
         kinds = [planlet.kind for planlet in bundle.planlets]
         unsupported = [kind for kind in kinds if kind not in PlanCompiler.DEFAULT_REGISTRY]
         if unsupported:
-            self._logger.warning(
-                "Planner emitted unsupported kinds %s; falling back to random plan.",
-                unsupported,
-            )
-            return self._fallback_bundle(observation, reason, "planner-unsupported")
+            message = f"Planner emitted unsupported kinds {unsupported}."
+            self._logger.warning(message)
+            raise RuntimeError(message)
         return bundle
-
-    def fallback_bundle(self, observation: Dict[str, object], *, reason: str) -> PlanBundle:
-        return self._fallback_bundle(observation, reason, "fallback-random")
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -286,26 +259,6 @@ class PlanCoordinator:
         raw_bundle["metadata"] = metadata
         return PlanBundle(plan_id=plan_id, goal=goal, planlets=[spec], raw=raw_bundle)
 
-    def _fallback_bundle(self, observation: Dict[str, object], reason: str, tag: str) -> PlanBundle:
-        bundle = self.fallback.build_bundle(observation)
-        self._last_source = tag
-        raw_bundle = dict(bundle.raw)
-        raw_bundle.update(
-            {
-                "source": "random",
-                "reason": reason,
-                "cache_hit": False,
-                "cache_key": None,
-                "metadata": {
-                    "plan_source": tag,
-                    "planner_origin": "random",
-                    "planner_reason": reason,
-                    "planner_cache_hit": False,
-                },
-            }
-        )
-        return PlanBundle(plan_id=bundle.plan_id, goal=bundle.goal, planlets=list(bundle.planlets), raw=raw_bundle)
-
     def _next_plan_id(self) -> str:
         self._plan_seq += 1
         return f"ow_plan_{int(time.time() * 1000)}_{self._plan_seq}"
@@ -313,6 +266,96 @@ class PlanCoordinator:
     def _next_planlet_id(self) -> str:
         self._planlet_seq += 1
         return f"ow_planlet_{int(time.time() * 1000)}_{self._planlet_seq}"
+
+
+def _serialise_args(args: argparse.Namespace) -> Dict[str, Any]:
+    def convert(value: Any) -> Any:
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, (list, tuple)):
+            return [convert(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): convert(val) for key, val in value.items()}
+        return value
+
+    return {key: convert(val) for key, val in vars(args).items()}
+
+
+def _detect_git_metadata() -> Dict[str, Optional[str]]:
+    metadata: Dict[str, Optional[str]] = {"commit": None, "branch": None}
+    try:
+        commit = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        metadata["commit"] = commit
+    except Exception:
+        pass
+    try:
+        branch = (
+            subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        metadata["branch"] = branch
+    except Exception:
+        pass
+    return metadata
+
+
+def _collect_run_metadata(
+    args: argparse.Namespace,
+    planner_service: Optional[PlanletService],
+    coordinator: PlanCoordinator,
+) -> Dict[str, Any]:
+    planner_backend = args.planner_backend or ("none" if planner_service is None else "unknown")
+    metadata: Dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cli": _serialise_args(args),
+        "run": {
+            "rom": str(Path(args.rom).resolve()),
+            "seed": args.seed,
+            "frames_per_step": args.frames_per_step,
+            "steps": args.steps,
+            "window": args.window,
+        },
+        "planner": {
+            "backend": planner_backend,
+            "model": args.planner_model,
+            "allow_search": args.planner_allow_search,
+            "cache_enabled": not args.disable_planner_cache and args.planner_cache_size > 0,
+            "nearby_limit": args.planner_nearby_limit,
+            "last_plan_source": coordinator.describe_last_source(),
+        },
+        "environment": {
+            "python_version": sys.version,
+            "platform": sys.platform,
+        },
+        "git": _detect_git_metadata(),
+    }
+    if planner_service is not None:
+        metadata["planner"]["client"] = planner_service.client.__class__.__name__
+    return metadata
+
+
+def _write_run_metadata(path: Path, metadata: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+
+
+def _extract_step_counter(observation: Mapping[str, object]) -> Optional[int]:
+    if not isinstance(observation, Mapping):
+        return None
+    overworld = observation.get("overworld")
+    if not isinstance(overworld, Mapping):
+        return None
+    value = overworld.get("step_counter")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def action_to_pokemon(action: Dict[str, object], *, frames_per_step: int) -> PokemonAction:
@@ -348,7 +391,7 @@ def build_planlet_service(
     backend_label = backend
 
     if backend == "none":
-        return None, "random"
+        return None, "none"
 
     proposer = PlanletProposer()
     store = PlanletStore(args.planner_store) if args.planner_store else None
@@ -410,23 +453,38 @@ def main() -> int:
     overworld = OverworldAdapter(adapter)
 
     executor = OverworldExecutor()
-    rng = random.Random(args.seed)
-    random_manager = RandomPlanManager(rng)
     planner_service, backend_label = build_planlet_service(args)
+    if planner_service is None:
+        LOGGER.error("Planner backend is required; configure --planner-backend with a supported value.")
+        return 1
     compiler = PlanCompiler()
     plan_coordinator = PlanCoordinator(
         executor=executor,
         service=planner_service,
-        fallback=random_manager,
         allow_search=args.planner_allow_search,
         nearby_limit=args.planner_nearby_limit,
         backend_label=backend_label,
         logger=LOGGER,
     )
     if planner_service is None:
-        LOGGER.info("Planner backend disabled; using random exploration planlets.")
+        LOGGER.info("Planner backend disabled; relying on deterministic menu plans only.")
     else:
         LOGGER.info("Planner backend initialised (%s).", backend_label)
+
+    if args.metadata_out:
+        metadata = _collect_run_metadata(args, planner_service, plan_coordinator)
+        try:
+            _write_run_metadata(Path(args.metadata_out), metadata)
+            LOGGER.info("Wrote run metadata to %s", Path(args.metadata_out))
+        except Exception:
+            LOGGER.exception("Failed to persist run metadata to %s", args.metadata_out)
+
+    if args.watchdog_save_slot is not None:
+        try:
+            adapter.save_state(args.watchdog_save_slot)
+            LOGGER.info("Saved initial PyBoy state to slot %s", args.watchdog_save_slot)
+        except Exception:
+            LOGGER.exception("Failed to save initial PyBoy state to slot %s.", args.watchdog_save_slot)
 
     recorder: Optional[OverworldTraceRecorder] = None
     if args.telemetry_out:
@@ -449,33 +507,27 @@ def main() -> int:
 
     obs_payload = to_executor_observation(observation, adapter)
     last_observation = obs_payload
+    planlet_watchdog_threshold = max(0, int(args.planlet_watchdog_steps or 0))
+    stall_watchdog_threshold = max(0, int(args.stall_watchdog_steps or 0))
+    planlet_watchdog_steps = 0
+    stall_watchdog_steps = 0
+    last_planlet_id: Optional[str] = None
+    last_step_counter = _extract_step_counter(obs_payload)
 
-    def load_new_plan(reason: str, current_observation: Dict[str, object]) -> None:
-        bundle = plan_coordinator.request_bundle(current_observation, reason=reason)
-        if bundle is None:
-            LOGGER.error("Planner returned no plan bundle; skipping load (reason=%s).", reason)
-            return
+    def load_plan_bundle(
+        bundle: PlanBundle,
+        current_observation: Dict[str, object],
+        *,
+        reason: str,
+    ) -> None:
         plan_metadata = dict(getattr(bundle, "raw", {}).get("metadata") or {})
         plan_metadata.setdefault("planner_reason", reason)
         plan_metadata.setdefault("plan_source", plan_coordinator.describe_last_source())
         try:
             compiled = compiler.compile(bundle)
         except PlanCompilationError:
-            LOGGER.exception(
-                "Failed to compile plan bundle; attempting random fallback (reason=%s).",
-                reason,
-            )
-            fallback_bundle = plan_coordinator.fallback_bundle(
-                current_observation, reason=f"{reason}:compile_error"
-            )
-            try:
-                plan_metadata = dict(getattr(fallback_bundle, "raw", {}).get("metadata") or {})
-                plan_metadata.setdefault("planner_reason", f"{reason}:compile_error")
-                plan_metadata.setdefault("plan_source", plan_coordinator.describe_last_source())
-                compiled = compiler.compile(fallback_bundle)
-            except PlanCompilationError:
-                LOGGER.exception("Fallback bundle also failed compilation; skipping load.")
-                return
+            LOGGER.exception("Failed to compile plan bundle (reason=%s).", reason)
+            return
         executor.load_compiled_plan(compiled, metadata=plan_metadata)
         LOGGER.info(
             "Loaded plan %s (%d planlets) source=%s reason=%s",
@@ -484,6 +536,14 @@ def main() -> int:
             plan_coordinator.describe_last_source(),
             reason,
         )
+
+    def load_new_plan(reason: str, current_observation: Dict[str, object]) -> None:
+        try:
+            bundle = plan_coordinator.request_bundle(current_observation, reason=reason)
+        except RuntimeError as exc:
+            LOGGER.error("No plan available after planner failure (reason=%s): %s", reason, exc)
+            return
+        load_plan_bundle(bundle, current_observation, reason=reason)
 
     def ensure_plan(current_observation: Dict[str, object], *, reason: str) -> None:
         if executor.state.current_planlet is not None or executor.state.plan_queue:
@@ -559,6 +619,67 @@ def main() -> int:
 
             obs_payload = to_executor_observation(observation, adapter)
             last_observation = obs_payload
+
+            active_planlet = getattr(executor.state.current_planlet, "spec", None)
+            if active_planlet is not None:
+                if active_planlet.id == last_planlet_id:
+                    planlet_watchdog_steps += 1
+                else:
+                    last_planlet_id = active_planlet.id
+                    planlet_watchdog_steps = 0
+            else:
+                last_planlet_id = None
+                planlet_watchdog_steps = 0
+
+            if planlet_watchdog_threshold > 0 and planlet_watchdog_steps >= planlet_watchdog_threshold:
+                LOGGER.warning(
+                    "Planlet watchdog triggered for planlet %s after %s steps; requesting new plan.",
+                    last_planlet_id,
+                    planlet_watchdog_steps,
+                )
+                load_new_plan("watchdog_planlet", obs_payload)
+                planlet_watchdog_steps = 0
+                last_planlet_id = None
+                continue
+
+            if stall_watchdog_threshold > 0:
+                current_counter = _extract_step_counter(obs_payload)
+                if current_counter is None or last_step_counter is None:
+                    stall_watchdog_steps = 0
+                elif current_counter == last_step_counter:
+                    stall_watchdog_steps += 1
+                else:
+                    stall_watchdog_steps = 0
+                last_step_counter = current_counter
+                if stall_watchdog_steps >= stall_watchdog_threshold:
+                    LOGGER.warning(
+                        "Stall watchdog triggered after %s steps without progress; attempting recovery.",
+                        stall_watchdog_steps,
+                    )
+                    stall_watchdog_steps = 0
+                    recovered = False
+                    if args.watchdog_save_slot is not None:
+                        try:
+                            adapter.load_state(args.watchdog_save_slot)
+                            observation = overworld.observe()
+                            obs_payload = to_executor_observation(observation, adapter)
+                            last_observation = obs_payload
+                            last_step_counter = _extract_step_counter(obs_payload)
+                            ensure_plan(obs_payload, reason="watchdog_stall_reload")
+                            LOGGER.info(
+                                "Reloaded PyBoy save-state slot %s after stall.",
+                                args.watchdog_save_slot,
+                            )
+                            recovered = True
+                        except Exception:
+                            LOGGER.exception(
+                                "Failed to reload save-state slot %s.",
+                                args.watchdog_save_slot,
+                            )
+                    if not recovered:
+                        load_new_plan("watchdog_stall_replan", obs_payload)
+                        last_step_counter = _extract_step_counter(obs_payload)
+                    continue
 
             if result.status in {"PLANLET_COMPLETE", "PLANLET_STALLED", "PLAN_COMPLETE"}:
                 ensure_plan(obs_payload, reason=f"executor_status:{result.status}")

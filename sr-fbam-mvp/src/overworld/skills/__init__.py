@@ -8,6 +8,7 @@ from .heal import HealSkill
 from .shop import ShopSkill
 from .talk import TalkSkill
 from .menu import MenuSkill
+from .menu_sequence import MenuSequenceSkill
 from .use_item import UseItemSkill
 from .interact import InteractSkill
 from .pickup import PickupSkill
@@ -25,6 +26,7 @@ __all__ = [
     "ShopSkill",
     "TalkSkill",
     "MenuSkill",
+    "MenuSequenceSkill",
     "UseItemSkill",
     "InteractSkill",
     "PickupSkill",

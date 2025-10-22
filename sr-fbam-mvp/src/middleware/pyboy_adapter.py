@@ -108,11 +108,16 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         return self._read_telemetry()
 
     def save_state(self, slot: int = 0) -> None:
-        # PyBoy save/load methods
-        pass
+        try:
+            self.pyboy.save_state(slot)
+        except AttributeError as exc:  # pragma: no cover - depends on PyBoy build
+            raise RuntimeError("PyBoy build does not support save_state.") from exc
 
     def load_state(self, slot: int = 0) -> PokemonTelemetry:
-        # PyBoy save/load methods
+        try:
+            self.pyboy.load_state(slot)
+        except AttributeError as exc:  # pragma: no cover - depends on PyBoy build
+            raise RuntimeError("PyBoy build does not support load_state.") from exc
         self._tick(60)
         self._ensure_bootstrapped()
         return self._read_telemetry()

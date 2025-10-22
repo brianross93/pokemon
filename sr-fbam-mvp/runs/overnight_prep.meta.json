@@ -1,0 +1,50 @@
+{
+  "timestamp": "2025-10-22T06:46:56.120491+00:00",
+  "cli": {
+    "rom": "Pokemon Blue.gb",
+    "steps": 100,
+    "telemetry_out": "runs\\overnight_prep.jsonl",
+    "policy_boot": false,
+    "window": "null",
+    "frames_per_step": 12,
+    "seed": 1337,
+    "planner_backend": "fake",
+    "planner_model": null,
+    "planner_api_key": null,
+    "planner_base_url": null,
+    "planner_store": null,
+    "planner_cache_size": 64,
+    "planner_cache_ttl": 900.0,
+    "disable_planner_cache": false,
+    "planner_nearby_limit": 5,
+    "planner_allow_search": false,
+    "metadata_out": "runs\\overnight_prep.meta.json",
+    "planlet_watchdog_steps": 900,
+    "stall_watchdog_steps": 600,
+    "watchdog_save_slot": 1
+  },
+  "run": {
+    "rom": "C:\\Users\\brssn\\OneDrive\\Desktop\\New folder\\sr-fbam-mvp\\Pokemon Blue.gb",
+    "seed": 1337,
+    "frames_per_step": 12,
+    "steps": 100,
+    "window": "null"
+  },
+  "planner": {
+    "backend": "fake",
+    "model": null,
+    "allow_search": false,
+    "cache_enabled": true,
+    "nearby_limit": 5,
+    "last_plan_source": "fake",
+    "client": "FakeOverworldLLM"
+  },
+  "environment": {
+    "python_version": "3.13.1 (tags/v3.13.1:0671451, Dec  3 2024, 19:06:28) [MSC v.1942 64 bit (AMD64)]",
+    "platform": "win32"
+  },
+  "git": {
+    "commit": "58523456d41a0f9029e64a2c76e356243af68851",
+    "branch": "main"
+  }
+}

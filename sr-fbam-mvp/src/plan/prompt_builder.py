@@ -17,6 +17,7 @@ from .planner_llm import PlanletSpec
 class PlannerPrompt:
     goal: Optional[str]
     entity_summary: List[Dict[str, object]]
+    menu_context: List[Dict[str, object]]
     plan_history: List[Dict[str, object]]
     outcomes: Dict[str, object]
     pending_planlets: List[Dict[str, object]]
@@ -41,6 +42,7 @@ class PlannerPromptBuilder:
         pending: Sequence[PlanletSpec],
     ) -> PlannerPrompt:
         entity_summary = self._summarise_entities(memory)
+        menu_context = self._summarise_menus(memory)
         history_entries, outcomes = self._summarise_history(history)
         pending_entries = [
             {
@@ -53,6 +55,7 @@ class PlannerPromptBuilder:
         return PlannerPrompt(
             goal=goal,
             entity_summary=entity_summary,
+            menu_context=menu_context,
             plan_history=history_entries,
             outcomes=outcomes,
             pending_planlets=pending_entries,
@@ -64,12 +67,26 @@ class PlannerPromptBuilder:
         goal_text = prompt.goal or "N/A"
         lines.append(f"Goal: {goal_text}")
         lines.append("")
+        lines.append(
+            "Supported planlet kinds: NAVIGATE_TO, MENU_SEQUENCE (buttons array), OPEN_MENU, USE_ITEM, HANDLE_ENCOUNTER."
+        )
+        lines.append("When menus are open, emit MENU_SEQUENCE planlets with explicit buttons (e.g., START, A, A).")
+        lines.append("")
 
         lines.append("Entity Summary:")
         for entry in prompt.entity_summary:
             lines.append(f"- {entry['type']}: {entry['count']}")
         if not prompt.entity_summary:
             lines.append("- (no entities observed)")
+        lines.append("")
+
+        lines.append("Menu Context:")
+        if prompt.menu_context:
+            for menu in prompt.menu_context:
+                path = " > ".join(menu.get("path", [])) or "(root)"
+                lines.append(f"- path={path} open={menu.get('open', False)} state={menu.get('state')}")
+        else:
+            lines.append("- (no menus open or detected)")
         lines.append("")
 
         lines.append("Recent Plan History:")
@@ -151,6 +168,23 @@ class PlannerPromptBuilder:
             "delta": successes - failures_total,
         }
         return history_entries, outcomes
+
+    def _summarise_menus(self, memory: OverworldMemory) -> List[Dict[str, object]]:
+        context: List[Dict[str, object]] = []
+        assoc_fn = getattr(memory, "assoc", None)
+        if assoc_fn is None:
+            return context
+        for node in assoc_fn(type_="MenuState"):
+            attributes = dict(node.attributes)
+            context.append(
+                {
+                    "path": list(attributes.get("path", [])),
+                    "open": bool(attributes.get("open")),
+                    "node_id": node.node_id,
+                    "state": attributes.get("state"),
+                }
+            )
+        return context
 
 
 __all__ = ["PlannerPromptBuilder", "PlannerPrompt"]

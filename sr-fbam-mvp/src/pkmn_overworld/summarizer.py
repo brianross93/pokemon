@@ -45,11 +45,13 @@ def summarize_world_for_llm(memory: OverworldMemory, *, nearby_limit: int = 5) -
     hazards = _sorted_nodes(memory, "Hazard")
     npcs = _sorted_nodes(memory, "NPC")
     shops = _sorted_nodes(memory, "Shop")
+    menus = _sorted_nodes(memory, "MenuState")
 
     nearby_tiles = tiles[:nearby_limit]
     nearby_npcs = npcs[:nearby_limit]
     nearby_shops = shops[:nearby_limit]
     nearby_hazards = hazards[:nearby_limit]
+    nearby_menus = menus[:nearby_limit]
 
     snapshot = memory.snapshot()
     graph_stats = {
@@ -64,7 +66,9 @@ def summarize_world_for_llm(memory: OverworldMemory, *, nearby_limit: int = 5) -
             "npcs": nearby_npcs,
             "shops": nearby_shops,
             "hazards": nearby_hazards,
+            "menus": nearby_menus,
         },
+        "menus": [menu for menu in menus if menu.get("open")],
         "graph": graph_stats,
     }
 

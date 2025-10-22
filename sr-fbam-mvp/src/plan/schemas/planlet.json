@@ -17,6 +17,7 @@
         "BUY_ITEM",
         "TALK_TO",
         "OPEN_MENU",
+        "MENU_SEQUENCE",
         "USE_ITEM",
         "HANDLE_ENCOUNTER"
       ]
@@ -54,6 +55,24 @@
           "type": "array",
           "items": {"type": "string"},
           "minItems": 1
+        },
+        "buttons": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        },
+        "sequence": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 1
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
         }
       }
     },

@@ -1,0 +1,17 @@
+{
+  "plan_id": "BOOT_MENU_SEQUENCE",
+  "goal": "Reach overworld from title screen",
+  "planlets": [
+    {
+      "id": "boot_press_start",
+      "kind": "MENU_SEQUENCE",
+      "args": {
+        "buttons": ["START", "A", "A"]
+      },
+      "timeout_steps": 90,
+      "recovery": [
+        {"on": "MENU_DESYNC", "do": "REPLAN"}
+      ]
+    }
+  ]
+}

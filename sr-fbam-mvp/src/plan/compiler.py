@@ -48,6 +48,7 @@ class PlanCompiler:
         "BUY_ITEM": "ShopSkill",
         "TALK_TO": "TalkSkill",
         "OPEN_MENU": "MenuSkill",
+        "MENU_SEQUENCE": "MenuSequenceSkill",
         "USE_ITEM": "UseItemSkill",
         "INTERACT": "InteractSkill",
         "PICKUP_ITEM": "PickupSkill",
