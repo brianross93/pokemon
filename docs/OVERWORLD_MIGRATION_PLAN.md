@@ -28,23 +28,34 @@ SR-FBAM already runs reliably inside battle simulations, but overworld execution
 
 ## Migration Plan
 
+### Status Snapshot (Oct 2025)
+- ✅ Controller loop now boots PyBoy, keeps SR-FBAM running, and routes HALT events through the executor’s replan handler.
+- ✅ `run_overworld_controller.py` wires in `PlanletService` (fake/mock/real backends), fallbacks, and logging of plan sources.
+- ⏳ Still to do: tighten boot automation (`--policy-boot` heuristics), attach live telemetry dashboards, and add runtime recovery playbooks.
+- ⏳ Pending planner work: richer overworld planlet templates, prompt context, and menu/navigation coverage beyond `NAVIGATE_TO`.
+
 ### Milestone 1 — Controller Foundations
-- Harden `scripts/run_overworld_controller.py`: deterministic boot with fallback to `--policy-boot`, watchdog for stuck states, graceful shutdown.
-- Ensure `OverworldExecutor` loads compiled planlets on start and continues after `PLANLET_COMPLETE` or `PLAN_COMPLETE`.
-- Wire continuous telemetry via `OverworldTraceRecorder`; include gate mode, skill metadata, plan IDs, and menu states every step.
-- DoD: Script can run for ≥2k steps without crashing, emits telemetry JSONL, and never loses the overworld state after boot.
+- ✅ Harden `scripts/run_overworld_controller.py`: deterministic boot helpers, signal handling, graceful shutdown.
+- ✅ Executor integration: controller now compiles planlets and reloads them on `PLANLET_COMPLETE`, `PLANLET_STALLED`, or `PLAN_COMPLETE`.
+- ✅ Planner bridge: `PlanCoordinator` routes HALT events to `PlanletService`, with cache/store support and random fallbacks.
+- ⏳ Telemetry polish: executor still records per-step traces, but controller-side status dashboards and menu-state audits remain to build.
+- ⏳ Boot automation: expand `_policy_bootstrap` coverage and add seed/config snapshots for reproducible runs.
+- DoD: Script sustains ≥2k steps; telemetry JSONL spans menus + overworld; boot sequence reliable without manual inputs.
 
 ### Milestone 2 — Planner/LLM Integration
-- Connect `OverworldExecutor.register_replan_handler` to `PlanletService` so HALT events fetch planlets from the configured backend (deterministic fake or LLM).
-- Extend planlet bundle compilation to cover menu navigation, interactions, and fallback scripts (not just `NAVIGATE_TO`).
-- Stage prompt context to include overworld summaries, gate history, and failure affordances.
-- DoD: When the executor HALTs, the controller obtains a planlet from the planner backend and resumes play; telemetry marks HALT/RESUME spans.
+- ✅ HALT wiring: controller registers the executor’s replan handler to call `PlanletService` (fake/mock/real backends selectable via CLI).
+- ⏳ Planlet breadth: compiler and schema still limited to `NAVIGATE_TO`-style planlets; need menu, interaction, and encounter variants.
+- ⏳ Prompt context: summariser output not yet augmented with gate history or failure affordances for the LLM.
+- ⏳ Telemetry markers: add explicit HALT/RESUME tags around planner calls for dashboarding.
+- DoD: HALT → planner → resume loop executes with LLM plans, including menus/interactions, and logs HALT spans with gate metadata.
 
 ### Milestone 3 — Telemetry & Observability
-- Keep recorder active for every domain (menu, overworld, battle). Log gate mix, adherence, tokens, and HALT causes.
-- Surface telemetry dashboards for live runs (success, path stretch, encounters, LLM calls).
-- Validate RAM offsets and entity extraction with `scripts/debug_overworld_addresses.py` before long captures.
-- DoD: Telemetry dashboards show overworld gate metrics trending, LLM usage, and path quality from live runs.
+- ✅ Executor traces now include plan metadata (source, cache hits, planner reason) and controller logs HALT events via `PlanletEvent` sink.
+- ✅ Per-step telemetry now captures explicit menu snapshots (state/cursor/flag) to support menu-state dashboards.
+- ✅ `scripts/summarize_telemetry.py` rolls enriched JSONL into Parquet gate/plan summaries (gate mix, HALT reasons, cache hit rates).
+- ⏳ Dashboards: build Grafana/Quicksight views for success rate, path stretch, encounters/LLM calls.
+- ⏳ Instrument RAM validation pipeline before long captures (run `scripts/debug_overworld_addresses.py` to lock offsets per ROM build).
+- DoD: Dashboards display overworld gate mix, LLM usage, tokens, adherence, and HALT causes from live runs.
 
 ### Milestone 4 — Runtime Reliability
 - Add watchdogs for stuck planlets, ROM reloads, or adapter failures; auto-resume from save states where possible.

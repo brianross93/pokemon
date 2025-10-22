@@ -10,6 +10,7 @@ import random
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -271,12 +272,39 @@ class PlanCoordinator:
         self._last_source = f"{self._backend_label}:{source}{suffix}"
 
         goal = payload.get("goal")
+        metadata = {
+            "plan_source": self._last_source,
+            "planner_origin": source,
+            "planner_reason": reason,
+            "planner_cache_hit": bool(cache_hit),
+        }
+        cache_key = raw_bundle.get("cache_key")
+        if cache_key:
+            metadata["planner_cache_key"] = cache_key
+        if token_usage:
+            metadata["planner_token_usage"] = token_usage
+        raw_bundle["metadata"] = metadata
         return PlanBundle(plan_id=plan_id, goal=goal, planlets=[spec], raw=raw_bundle)
 
     def _fallback_bundle(self, observation: Dict[str, object], reason: str, tag: str) -> PlanBundle:
         bundle = self.fallback.build_bundle(observation)
         self._last_source = tag
-        return bundle
+        raw_bundle = dict(bundle.raw)
+        raw_bundle.update(
+            {
+                "source": "random",
+                "reason": reason,
+                "cache_hit": False,
+                "cache_key": None,
+                "metadata": {
+                    "plan_source": tag,
+                    "planner_origin": "random",
+                    "planner_reason": reason,
+                    "planner_cache_hit": False,
+                },
+            }
+        )
+        return PlanBundle(plan_id=bundle.plan_id, goal=bundle.goal, planlets=list(bundle.planlets), raw=raw_bundle)
 
     def _next_plan_id(self) -> str:
         self._plan_seq += 1
@@ -427,6 +455,9 @@ def main() -> int:
         if bundle is None:
             LOGGER.error("Planner returned no plan bundle; skipping load (reason=%s).", reason)
             return
+        plan_metadata = dict(getattr(bundle, "raw", {}).get("metadata") or {})
+        plan_metadata.setdefault("planner_reason", reason)
+        plan_metadata.setdefault("plan_source", plan_coordinator.describe_last_source())
         try:
             compiled = compiler.compile(bundle)
         except PlanCompilationError:
@@ -438,11 +469,14 @@ def main() -> int:
                 current_observation, reason=f"{reason}:compile_error"
             )
             try:
+                plan_metadata = dict(getattr(fallback_bundle, "raw", {}).get("metadata") or {})
+                plan_metadata.setdefault("planner_reason", f"{reason}:compile_error")
+                plan_metadata.setdefault("plan_source", plan_coordinator.describe_last_source())
                 compiled = compiler.compile(fallback_bundle)
             except PlanCompilationError:
                 LOGGER.exception("Fallback bundle also failed compilation; skipping load.")
                 return
-        executor.load_compiled_plan(compiled)
+        executor.load_compiled_plan(compiled, metadata=plan_metadata)
         LOGGER.info(
             "Loaded plan %s (%d planlets) source=%s reason=%s",
             compiled.plan_id,
@@ -470,6 +504,38 @@ def main() -> int:
         return plan_coordinator.request_bundle(last_observation, reason=tag)
 
     executor.register_replan_handler(replan_handler)
+    if recorder is not None:
+        def _plan_event_logger(event) -> None:
+            plan_payload = {
+                "id": event.plan_id,
+                "planlet_id": event.planlet_id,
+                "planlet_kind": event.planlet_kind,
+            }
+            metadata = getattr(event, "metadata", None)
+            if isinstance(metadata, dict):
+                plan_payload.update(metadata)
+            context = {
+                "domain": "overworld",
+                "status": event.status,
+                "step_index": event.step_index,
+                "plan": plan_payload,
+            }
+            if event.reason:
+                context["reason"] = event.reason
+            payload = {
+                "source": "overworld.controller.plan_event",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "context": context,
+                "telemetry": event.telemetry,
+            }
+            if event.trace:
+                payload["observation"] = {"trace": event.trace}
+            try:
+                recorder.record(payload)
+            except Exception:
+                LOGGER.exception("Failed to record plan event telemetry.")
+
+        executor.register_event_sink(_plan_event_logger)
     ensure_plan(obs_payload, reason="initial")
 
     step = 0

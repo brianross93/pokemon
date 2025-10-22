@@ -162,6 +162,7 @@ class OverworldExecutor:
         self._battle_handler: Optional[Callable[[EncounterRequest], EncounterResult]] = None
         self._encounter_bridge = EncounterBridge()
         self._last_observation: Optional[Mapping[str, object]] = None
+        self._plan_metadata: Dict[str, object] = {}
 
     # ------------------------------------------------------------------ #
     # Configuration helpers
@@ -201,18 +202,46 @@ class OverworldExecutor:
 
         self._max_replans = max(0, int(value))
 
+    def set_plan_metadata(self, metadata: Optional[Mapping[str, object]]) -> None:
+        """Attach metadata about the active plan for telemetry and events."""
+
+        self._plan_metadata = dict(metadata or {})
+
+    def plan_metadata(self) -> Dict[str, object]:
+        """Return a copy of the active plan metadata."""
+
+        return dict(self._plan_metadata)
+
     # ------------------------------------------------------------------ #
     # Plan management
     # ------------------------------------------------------------------ #
 
-    def load_plan_bundle(self, bundle: PlanBundle, compiler: Optional[PlanCompiler] = None) -> None:
+    def load_plan_bundle(
+        self,
+        bundle: PlanBundle,
+        compiler: Optional[PlanCompiler] = None,
+        *,
+        metadata: Optional[Mapping[str, object]] = None,
+    ) -> None:
         compiled = (compiler or PlanCompiler()).compile(bundle)
-        self._set_plan(compiled, reset_replans=True)
+        plan_metadata = dict(metadata or self._bundle_metadata(bundle))
+        self._set_plan(compiled, reset_replans=True, metadata=plan_metadata)
 
-    def load_compiled_plan(self, plan: CompiledPlan) -> None:
-        self._set_plan(plan, reset_replans=True)
+    def load_compiled_plan(
+        self,
+        plan: CompiledPlan,
+        *,
+        metadata: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        self._set_plan(plan, reset_replans=True, metadata=dict(metadata or {}))
 
-    def _set_plan(self, plan: CompiledPlan, *, reset_replans: bool) -> None:
+    def _set_plan(
+        self,
+        plan: CompiledPlan,
+        *,
+        reset_replans: bool,
+        metadata: Optional[Mapping[str, object]] = None,
+    ) -> None:
         self.state = ExecutorState(plan_queue=deque(plan.planlets))
         self.plan_id = plan.plan_id
         self.monitor.reset()
@@ -224,6 +253,7 @@ class OverworldExecutor:
             self._encounter_bridge.reset()
             self._replan_attempts = 0
         self._last_observation = None
+        self._plan_metadata = dict(metadata or {})
 
     # ------------------------------------------------------------------ #
     # Execution loop
@@ -372,6 +402,13 @@ class OverworldExecutor:
         overworld_data["memory"] = self.memory.summarise_nodes()
         overworld_data["view_usage"] = dict(self._view_counts)
         overworld_data["hybrid"] = dict(hybrid_stats)
+        menu_snapshot = self._extract_menu_snapshot(observation)
+        if menu_snapshot is not None:
+            overworld_data["menu_state"] = int(menu_snapshot.get("state", 0))
+            if "cursor" in menu_snapshot:
+                overworld_data["menu_cursor"] = menu_snapshot["cursor"]
+            overworld_data["is_menu"] = bool(menu_snapshot.get("is_menu", False))
+            overworld_data["menu_snapshot"] = menu_snapshot
 
         if isinstance(skill, NavigateSkill):
             overworld_data["navigate"] = {
@@ -403,6 +440,14 @@ class OverworldExecutor:
         planlet_id = planlet.spec.id
         planlet_kind = planlet.spec.kind
         overworld_data["planlet_kind"] = planlet_kind
+        plan_context = {
+            "id": self.plan_id,
+            "planlet_id": planlet_id,
+            "planlet_kind": planlet_kind,
+        }
+        if self._plan_metadata:
+            plan_context.update(self._plan_metadata)
+        telemetry.setdefault("core", {})["plan"] = plan_context
         if progress.status is SkillStatus.SUCCEEDED:
             skill.on_exit(self.memory)
             self.monitor.clear_planlet(planlet.spec.id)
@@ -450,6 +495,7 @@ class OverworldExecutor:
             step_index=step_index,
             observation=observation_payload,
             telemetry=telemetry_payload,
+            reason=reason,
         )
 
         self.state.step_index += 1
@@ -493,6 +539,7 @@ class OverworldExecutor:
             step_index=step_index,
             telemetry=dict(telemetry),
             trace=trace,
+            metadata=dict(self._plan_metadata),
         )
 
     def _emit_event(self, event: PlanletEvent) -> None:
@@ -524,8 +571,57 @@ class OverworldExecutor:
         except PlanCompilationError:
             raise
 
+        metadata = self._bundle_metadata(bundle)
         self._replan_attempts += 1
-        self._set_plan(compiled, reset_replans=False)
+        self._set_plan(compiled, reset_replans=False, metadata=metadata)
+
+    def _bundle_metadata(self, bundle: PlanBundle) -> Dict[str, object]:
+        raw = getattr(bundle, "raw", None)
+        if isinstance(raw, Mapping):
+            meta = raw.get("metadata")
+            if isinstance(meta, Mapping):
+                return dict(meta)
+        return {}
+
+    def _extract_menu_snapshot(self, observation: Mapping[str, object]) -> Optional[Dict[str, object]]:
+        overworld = observation.get("overworld") if isinstance(observation, Mapping) else None
+        if not isinstance(overworld, Mapping):
+            return None
+        extras = overworld.get("extra")
+        menus = overworld.get("menus")
+        state = self._coerce_int(overworld.get("menu_state"))
+        cursor = self._coerce_int(overworld.get("menu_cursor"))
+        joy_ignore = self._coerce_int(overworld.get("joy_ignore"))
+        if isinstance(extras, Mapping):
+            if state is None:
+                state = self._coerce_int(extras.get("menu_state"))
+            if cursor is None:
+                cursor = self._coerce_int(extras.get("menu_cursor"))
+            if joy_ignore is None:
+                joy_ignore = self._coerce_int(extras.get("joy_ignore"))
+        has_menu_struct = isinstance(menus, (list, tuple)) and len(menus) > 0
+        if state is None and cursor is None and not has_menu_struct:
+            return None
+        snapshot: Dict[str, object] = {}
+        state_value = 0 if state is None else int(state)
+        snapshot["state"] = state_value
+        if cursor is not None:
+            snapshot["cursor"] = int(cursor)
+        if joy_ignore is not None:
+            snapshot["joy_ignore"] = int(joy_ignore)
+        if has_menu_struct:
+            snapshot["menus"] = [dict(menu) if isinstance(menu, Mapping) else menu for menu in menus]
+        snapshot["is_menu"] = bool(state_value) or has_menu_struct
+        return snapshot
+
+    @staticmethod
+    def _coerce_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
     def _reset_view_counts(self) -> None:
         self._view_counts = {"typed": 0, "slots": 0}
 
@@ -604,6 +700,7 @@ class OverworldExecutor:
         step_index: int,
         observation: object,
         telemetry: object,
+        reason: Optional[str],
     ) -> None:
         if self._trace_recorder is None or planlet_id is None:
             return
@@ -617,6 +714,10 @@ class OverworldExecutor:
             "status": status,
             "step_index": int(step_index),
         }
+        if self._plan_metadata:
+            context["plan"].update(dict(self._plan_metadata))
+        if reason:
+            context["reason"] = reason
         payload = {
             "source": "sr-fbam.overworld.executor",
             "context": context,

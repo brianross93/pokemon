@@ -41,6 +41,7 @@ class PlanletEvent:
     step_index: int
     telemetry: Dict[str, object]
     trace: List[Dict[str, object]] = field(default_factory=list)
+    metadata: Dict[str, object] = field(default_factory=dict)
 
 
 __all__ = ["PlanletEvent"]
