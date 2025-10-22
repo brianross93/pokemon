@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Mapping, Sequence
 import torch
 from torch.utils.data import Dataset
 
-from plan.features import PLAN_FEATURE_DIM, build_plan_feature_vector
+from src.plan.features import PLAN_FEATURE_DIM, build_plan_feature_vector
 
 VIEW_TO_INDEX = {"typed": 0, "slots": 1}
 
@@ -21,6 +21,7 @@ class OverworldDecision:
     encode_flag: torch.Tensor
     view_index: torch.Tensor
     success_flag: torch.Tensor
+    menu_state: torch.Tensor
 
 
 class OverworldDecisionDataset(
@@ -29,6 +30,7 @@ class OverworldDecisionDataset(
             torch.Tensor,
             torch.Tensor,
             int,
+            torch.Tensor,
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
@@ -66,7 +68,7 @@ class OverworldDecisionDataset(
 
     def __getitem__(
         self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         item = self._items[index]
         return (
             item.frame_features,
@@ -75,6 +77,7 @@ class OverworldDecisionDataset(
             item.encode_flag,
             item.view_index,
             item.success_flag,
+            item.menu_state,
         )
 
     def _load_file(self, path: Path) -> None:
@@ -92,6 +95,9 @@ class OverworldDecisionDataset(
 def _parse_overworld_record(record: Mapping[str, object]) -> OverworldDecision | None:
     new_schema = isinstance(record.get("telemetry"), Mapping) and isinstance(record.get("context"), Mapping)
 
+    menu_state = 0
+    menu_flag = 0.0
+
     if new_schema:
         context = record.get("context", {})
         telemetry = record.get("telemetry", {})
@@ -101,6 +107,12 @@ def _parse_overworld_record(record: Mapping[str, object]) -> OverworldDecision |
         frame_features = _ensure_float_list(overworld.get("frame_features"))
         action_index = overworld.get("action_index")
         gate = core.get("gate", {}) if isinstance(core, Mapping) else {}
+        if isinstance(overworld, Mapping):
+            try:
+                menu_state = int(overworld.get("menu_state") or 0)
+            except (TypeError, ValueError):
+                menu_state = 0
+            menu_flag = 1.0 if overworld.get("is_menu") else 0.0
         plan = {}
         if isinstance(context, Mapping):
             plan.update(context.get("plan", {}) or {})
@@ -134,6 +146,8 @@ def _parse_overworld_record(record: Mapping[str, object]) -> OverworldDecision |
         plan_adherence = record.get("plan_adherence")
         mode_value = str(telemetry.get("mode") or record.get("mode") or "").lower()
         status = record.get("status")
+        menu_state = int(record.get("menu_state", 0) or 0)
+        menu_flag = 1.0 if record.get("is_menu") else 0.0
 
     if not frame_features or action_index is None:
         return None
@@ -161,6 +175,7 @@ def _parse_overworld_record(record: Mapping[str, object]) -> OverworldDecision |
         encode_flag=torch.tensor(encode_flag, dtype=torch.float32),
         view_index=torch.tensor(VIEW_TO_INDEX.get(view, 0), dtype=torch.long),
         success_flag=torch.tensor(success_flag, dtype=torch.float32),
+        menu_state=torch.tensor(float(menu_state) if menu_flag else 0.0, dtype=torch.float32),
     )
 
 

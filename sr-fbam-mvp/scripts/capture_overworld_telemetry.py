@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -90,6 +91,11 @@ def parse_args() -> argparse.Namespace:
         help="Include raw memory reads for configured addresses in the telemetry output (PyBoy only).",
     )
     parser.add_argument(
+        "--policy-boot",
+        action="store_true",
+        help="Use the overworld controller policy to move through menus instead of deterministic boot sequences.",
+    )
+    parser.add_argument(
         "--seed-set",
         nargs="+",
         default=["corridor_a", "corridor_b"],
@@ -132,6 +138,88 @@ def make_plan_context(run_id: str) -> Mapping[str, object]:
 
 
 TelemetryLike = Union[PokemonTelemetry, OverworldObservation, Mapping[str, Any]]
+
+
+def _extract_menu_state_value(extras: Mapping[str, Any]) -> int:
+    if not isinstance(extras, Mapping):
+        return 0
+    value = extras.get("menu_state")
+    try:
+        return int(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return 0
+
+
+def _is_overworld_state(telemetry: TelemetryLike) -> bool:
+    overworld = getattr(telemetry, "overworld", None)
+    if isinstance(overworld, Mapping):
+        area_id = int(overworld.get("area_id") or 0)
+        in_battle = bool(overworld.get("in_battle") or False)
+        return area_id > 0 and not in_battle
+    if isinstance(telemetry, PokemonTelemetry):
+        return bool(telemetry.area_id) and not telemetry.in_battle
+    return False
+
+
+def _select_menu_action(
+    telemetry: TelemetryLike,
+    *,
+    frames_per_step: int,
+    rng: random.Random,
+) -> Optional[PokemonAction]:
+    if _is_overworld_state(telemetry):
+        return None
+    extras = getattr(telemetry, "overworld", {})
+    extras = extras.get("extra") if isinstance(extras, Mapping) else {}
+    menu_state = _extract_menu_state_value(extras or {})
+
+    def _press(button: str, frames: int = 6) -> PokemonAction:
+        if button == "SCRIPT":
+            raise ValueError("SCRIPT button requires explicit inputs")
+        return PokemonAction(button, {"frames": frames})
+
+    if menu_state == 0:
+        # Typically title screen – press START with occasional WAIT.
+        if rng.random() < 0.85:
+            return _press("START")
+        return PokemonAction("WAIT", {"frames": frames_per_step})
+    if menu_state in {1, 2}:
+        # New game intro / continue prompt – prefer A, sprinkle DOWN to advance cursors.
+        if rng.random() < 0.8:
+            return _press("A")
+        return PokemonAction("SCRIPT", {"inputs": ["DOWN"], "frames": 6})
+    if menu_state in {3, 4, 5}:
+        # Naming / confirmation menus – alternate between A and UP/DOWN to move cursors.
+        if rng.random() < 0.6:
+            return _press("A")
+        direction = rng.choice(["UP", "DOWN"])  # pragma: no branch
+        return PokemonAction("SCRIPT", {"inputs": [direction], "frames": 6})
+    # Fallback: poke the system with A/B and occasional WAIT.
+    roll = rng.random()
+    if roll < 0.7:
+        return _press("A")
+    if roll < 0.9:
+        return _press("B")
+    return PokemonAction("WAIT", {"frames": frames_per_step})
+
+
+def _policy_bootstrap(
+    overworld: OverworldAdapter,
+    initial: TelemetryLike,
+    *,
+    frames_per_step: int,
+    max_steps: int = 900,
+) -> TelemetryLike:
+    rng = random.Random(1337)
+    telemetry: TelemetryLike = initial
+    for step in range(max_steps):
+        if _is_overworld_state(telemetry):
+            return telemetry
+        action = _select_menu_action(telemetry, frames_per_step=frames_per_step, rng=rng)
+        if action is None:
+            return telemetry
+        telemetry = overworld.step(action)
+    return telemetry
 
 
 class GateEventLogger:
@@ -295,6 +383,8 @@ def build_payload(
     fractions["encode"] = round(max(0.0, min(1.0, fractions["encode"])), 3)
     fractions["query"] = round(max(0.0, min(1.0, fractions["query"])), 3)
     fractions["skip"] = round(max(0.0, min(1.0, 1.0 - fractions["encode"] - fractions["query"])), 3)
+    menu_state = _extract_menu_state_value(extras)
+    is_menu_state = 1 if not _is_overworld_state(telemetry) else 0
     payload = {
         "source": "capture.overworld",
         "timestamp": timestamp,
@@ -332,6 +422,8 @@ def build_payload(
                     "plan_step": step,
                     "steps_total": 256,
                     "confidence": gate_payload["confidence"],
+                    "menu_state": menu_state,
+                    "menu_flag": is_menu_state,
                 },
             },
             "overworld": {
@@ -339,6 +431,8 @@ def build_payload(
                 "frame_features": frame_features,
                 "action_index": action_index,
                 "status": "RUNNING",
+                "menu_state": menu_state,
+                "is_menu": bool(is_menu_state),
             },
         },
     }
@@ -359,6 +453,8 @@ def build_payload(
         "fractions": fractions,
         "adherence": gate_payload.get("adherence"),
         "domain": "overworld",
+        "menu_state": menu_state,
+        "is_menu": bool(is_menu_state),
     }
     return payload, gate_event
 
@@ -392,6 +488,12 @@ def capture_with_pyboy(
                     except Exception as exc:  # pragma: no cover - defensive guard
                         print(f"[warn] Failed to apply RNG seed {seed_value} ({seed_name}): {exc}")
                 telemetry = overworld.reset()
+                if args.policy_boot:
+                    telemetry = _policy_bootstrap(
+                        overworld,
+                        telemetry,
+                        frames_per_step=args.frames_per_step,
+                    )
                 trace_run_id = f"{run_id}:{seed_name}:{trace_index}"
                 plan_context = make_plan_context(trace_run_id)
 

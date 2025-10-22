@@ -32,6 +32,11 @@ class ModeSlice:
             unique, counts = torch.unique(self.gate_targets, return_counts=True)
             for value, count in zip(unique.tolist(), counts.tolist()):
                 stats[f"gate_{int(value)}_frac"] = float(count / max(1, self.count()))
+        menu_tensor = self.extras.get("menu_state") if isinstance(self.extras, dict) else None
+        if menu_tensor is not None and menu_tensor.numel() > 0:
+            menu_float = menu_tensor.float()
+            stats["menu_state_mean"] = float(menu_float.mean().item())
+            stats["menu_state_nonzero_frac"] = float((menu_float > 0.5).float().mean().item())
         return stats
 
 
@@ -128,13 +133,15 @@ def _collect_overworld_slice(dataset: OverworldDecisionDataset, limit: Optional[
     plan_features: List[torch.Tensor] = []
     encode_flags: List[torch.Tensor] = []
     success_flags: List[torch.Tensor] = []
+    menu_flags: List[torch.Tensor] = []
     for index in range(len(dataset)):
         if limit is not None and index >= limit:
             break
-        _, plan, _, encode_flag, view_idx, success_flag = dataset[index]
-        plan_features.append(plan.unsqueeze(0))
-        encode_flags.append(encode_flag.view(1, -1))
-        success_flags.append(success_flag.view(1, -1))
+        item = dataset._items[index]
+        plan_features.append(item.plan_features.unsqueeze(0))
+        encode_flags.append(item.encode_flag.view(1, -1))
+        success_flags.append(item.success_flag.view(1, -1))
+        menu_flags.append(item.menu_state.view(1, -1))
     if not plan_features:
         empty = torch.zeros((0, dataset.plan_feature_dim), dtype=torch.float32)
         return ModeSlice(mode="overworld", plan_features=empty)
@@ -142,6 +149,7 @@ def _collect_overworld_slice(dataset: OverworldDecisionDataset, limit: Optional[
     extras: Dict[str, torch.Tensor] = {}
     extras["encode_flag"] = torch.cat(encode_flags, dim=0)
     extras["success_flag"] = torch.cat(success_flags, dim=0)
+    extras["menu_state"] = torch.cat(menu_flags, dim=0)
     return ModeSlice(
         mode="overworld",
         plan_features=features_tensor,

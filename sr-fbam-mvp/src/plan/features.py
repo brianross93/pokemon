@@ -6,7 +6,7 @@ import struct
 from typing import Iterable, Mapping, Optional, Sequence
 
 
-PLAN_STRUCTURED_DIM = 20
+PLAN_STRUCTURED_DIM = 22
 PLAN_EMBED_DIM = 16
 PLAN_FEATURE_DIM = PLAN_STRUCTURED_DIM + PLAN_EMBED_DIM
 
@@ -133,6 +133,17 @@ def build_plan_feature_vector(
         adherence_ok,
         adherence_bad,
     ]
+
+    menu_state_value = None
+    menu_flag_value = None
+    if isinstance(plan_metrics, Mapping):
+        menu_state_value = plan_metrics.get("menu_state")
+        menu_flag_value = plan_metrics.get("menu_flag")
+
+    menu_state_norm = _normalize_count(_safe_int(menu_state_value, default=0), cap=10)
+    menu_flag = 1.0 if _coerce_bool(menu_flag_value) or menu_state_norm > 0 else 0.0
+    structured.append(menu_state_norm)
+    structured.append(menu_flag)
 
     embedding_tokens = _collect_plan_tokens(plan, plan_metrics, plan_adherence)
     embedding = _hashed_embedding(embedding_tokens, dims=PLAN_EMBED_DIM)

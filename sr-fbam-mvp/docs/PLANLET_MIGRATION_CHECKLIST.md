@@ -82,6 +82,7 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
   - [x] Plumb telemetry upload into feature store job; alert Phase 6 owners when stable.
   - [ ] Use `scripts/debug_overworld_addresses.py` to validate ROM-specific RAM offsets before long captures.
   - [ ] Auto-boot PyBoy past title screen (`PyBoyPokemonAdapter._ensure_bootstrapped`) so captures drop straight into overworld control.
+  - [x] Detect and log menu states; support `--policy-boot` autonomous navigation to reach overworld naturally.
 - [ ] [new] Waypoint mini-graph planner for overworld navigation
   - [ ] Publish `docs/graphs/SCHEMA.md` with node/edge schema (encounter, resources, costs).
   - [ ] Ship `scripts/build_overworld_graph.py` to derive zone graphs from `data/overworld/static_entities.json`.

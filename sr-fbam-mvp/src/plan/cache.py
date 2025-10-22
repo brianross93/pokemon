@@ -11,8 +11,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
-from pkmn_battle.summarizer import GraphSummary
-from pkmn_overworld.summarizer import WorldSummary
+from src.pkmn_battle.summarizer import GraphSummary
+from src.pkmn_overworld.summarizer import WorldSummary
 
 
 def _hash_payload(payload: Mapping[str, Any]) -> str:

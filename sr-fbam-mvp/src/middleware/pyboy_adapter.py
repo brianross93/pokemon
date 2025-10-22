@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     WindowEvent = None  # type: ignore[assignment]
 
 from src.middleware.pokemon_adapter import PokemonAction, PokemonBlueAdapter, PokemonTelemetry
+from src.overworld.ram_map import DEFAULT_OVERWORLD_RAM_MAP
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from src.pkmn_battle.env.blue_ram_adapter import BlueBattleRAMMap, BlueRAMAdapter
@@ -115,6 +116,40 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         self._tick(60)
         self._ensure_bootstrapped()
         return self._read_telemetry()
+
+    def snapshot_overworld_ram(self) -> Dict[int, int]:
+        """Return a mapping of key overworld RAM addresses -> values."""
+
+        mapping: Dict[int, int] = {}
+        mem = self.pyboy.memory
+
+        def read(addr: int) -> int:
+            try:
+                return int(mem[addr]) & 0xFF
+            except (IndexError, ValueError):  # pragma: no cover - defensive
+                return 0
+
+        for name, address in DEFAULT_OVERWORLD_RAM_MAP.items():
+            value = read(address)
+            mapping[address] = value
+            if name == "warp_table":
+                count_addr = DEFAULT_OVERWORLD_RAM_MAP.get("warp_count")
+                warp_count = read(count_addr) if count_addr is not None else 0
+                warp_count = max(0, min(8, warp_count))
+                for index in range(warp_count):
+                    base = address + index * 4
+                    for offset in range(4):
+                        mapping[base + offset] = read(base + offset)
+            elif name == "npc_table":
+                count_addr = DEFAULT_OVERWORLD_RAM_MAP.get("npc_count")
+                npc_count = read(count_addr) if count_addr is not None else 0
+                npc_count = max(0, min(16, npc_count))
+                for index in range(npc_count):
+                    base = address + index * 4
+                    for offset in range(4):
+                        mapping[base + offset] = read(base + offset)
+
+        return mapping
 
     def set_rng_seed(self, seed: int) -> None:
         """

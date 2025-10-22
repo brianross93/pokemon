@@ -13,7 +13,7 @@ from typing import Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tup
 import torch
 from torch import Tensor
 
-from srfbam.core import EncodedFrame, SRFBAMCore, SrfbamStepSummary
+from src.srfbam.core import EncodedFrame, SRFBAMCore, SrfbamStepSummary
 
 from src.plan.compiler import CompiledPlan, CompiledPlanlet, PlanCompilationError, PlanCompiler
 from src.plan.planner_llm import PlanBundle, validate_plan_bundle

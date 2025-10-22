@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from src.middleware.pokemon_adapter import PokemonTelemetry
+from src.middleware.pokemon_adapter import PokemonAction, PokemonTelemetry
 
 
 @dataclass
@@ -37,7 +37,7 @@ class OverworldAdapter:
         raw = self._adapter.observe()
         return self._to_observation(raw)
 
-    def step(self, action: Dict[str, Any]) -> OverworldObservation:
+    def step(self, action: PokemonAction) -> OverworldObservation:
         raw = self._adapter.step(action)
         return self._to_observation(raw)
 
