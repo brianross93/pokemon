@@ -9,3 +9,4 @@ tqdm>=4.66
 datasets>=2.19
 huggingface_hub>=0.21
 lz4>=4.3
+PyYAML>=6.0

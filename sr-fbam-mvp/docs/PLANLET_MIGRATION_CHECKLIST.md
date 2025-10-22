@@ -74,11 +74,12 @@ DoD: Fake planlets execute >=2 script steps via PLAN_STEP; aborts log adhere cod
 - [ ] [new] Mix battle/overworld curriculum + augmentations (tile jitter, encounter injection, plan dropout) - blocked on overworld telemetry import
   - [x] Draft augmentation recipes while telemetry import finishes; stage knobs in `configs/train_plan.yaml`.
   - [x] Define curriculum schedule (battle-heavy warmup -> balanced mix); document gating heuristics for review.
-  - [ ] Add unit smoke covering mixed-mode batch sampler once overworld traces land.
+  - [x] Add unit smoke covering mixed-mode batch sampler once overworld traces land.
+  - [x] Wire trainer CLI to consume `configs/train_plan.yaml` (scheduler hints + logging).
 - [ ] [new] Generate overworld telemetry via PyBoy corridor runs (plan metadata + gate/adherence logs) - harness at `scripts/capture_overworld_telemetry.py`
   - [ ] Lock PyBoy seed set + corridor scripts; capture min 50 high-quality traces per skill.
   - [x] Extend harness to emit gate/adherence JSONL alongside screenshots for spot checks.
-  - [ ] Plumb telemetry upload into feature store job; alert Phase 6 owners when stable.
+  - [x] Plumb telemetry upload into feature store job; alert Phase 6 owners when stable.
   - [ ] Use `scripts/debug_overworld_addresses.py` to validate ROM-specific RAM offsets before long captures.
   - [ ] Auto-boot PyBoy past title screen (`PyBoyPokemonAdapter._ensure_bootstrapped`) so captures drop straight into overworld control.
 - [ ] [new] Waypoint mini-graph planner for overworld navigation

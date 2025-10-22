@@ -5,6 +5,11 @@ defaults: []
 
 mix:
   warmup_epochs: 3
+  scheduler:
+    type: cosine
+    min_lr: 0.00005
+    warmup_epochs: 1
+    total_epochs: 10
   schedule:
     - end_epoch: 3
       battle_fraction: 0.85
@@ -70,8 +75,8 @@ overworld_requirements:
     - corridor_c
     - corridor_d
   telemetry_sources:
-    - data/overworld/corridor/*.jsonl
-    - data/overworld/debug/*.jsonl
+    - data/overworld/pyboy_*.jsonl
+    - data/overworld/dry_run_trace.jsonl
 
 gating_heuristics:
   battle_warmup:

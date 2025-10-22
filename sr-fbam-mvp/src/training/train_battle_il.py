@@ -13,14 +13,24 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Mapping
 
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, StepLR
 from torch.utils.data import DataLoader, Dataset
 
-from pkmn_battle.ingest import BattleDecisionDataset
+from src.pkmn_battle.ingest import BattleDecisionDataset
+
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover
+    yaml = None
+
+
+GATE_INDEX_ENCODE = 0
+GATE_INDEX_PLAN_LOOKUP = 4
+GATE_INDEX_PLAN_STEP = 5
 
 
 class BattlePolicyMLP(nn.Module):
@@ -86,6 +96,11 @@ def parse_args() -> argparse.Namespace:
         "--metrics-out",
         type=Path,
         help="Optional path to write JSON metrics (accuracy, loss).",
+    )
+    parser.add_argument(
+        "--curriculum-config",
+        type=Path,
+        help="Optional YAML config (defaults to configs/train_plan.yaml when present).",
     )
     parser.add_argument(
         "--load-checkpoint",
@@ -189,6 +204,8 @@ def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    curriculum = _apply_curriculum_defaults(args)
+
     device = torch.device(
         "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
     )
@@ -287,6 +304,7 @@ def main() -> None:
             "scheduler_gamma": args.scheduler_gamma,
             "scheduler_min_lr": args.scheduler_min_lr,
             "trainable_parameters": trainable_param_count,
+            "curriculum": curriculum,
         },
     )
 
@@ -301,12 +319,8 @@ def main() -> None:
     )
 
     best_val_acc = 0.0
-    last_train_metrics: Dict[str, float] = {
-        "action_loss": 0.0,
-        "action_acc": 0.0,
-        "gate_loss": 0.0,
-        "gate_acc": 0.0,
-    }
+    last_train_metrics: Dict[str, float] = {}
+    last_val_metrics: Optional[Dict[str, float]] = None
     for epoch in range(1, args.epochs + 1):
         last_train_metrics = run_epoch(
             model=model,
@@ -320,12 +334,20 @@ def main() -> None:
         )
         current_lr = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
         logging.info(
-            "[epoch %d] train action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f lr %.6e",
+            "[epoch %d] train action_loss %.4f action_acc %.3f gate_loss %.4f gate_acc %.3f",
             epoch,
             last_train_metrics["action_loss"],
             last_train_metrics["action_acc"],
             last_train_metrics["gate_loss"],
             last_train_metrics["gate_acc"],
+        )
+        logging.info(
+            "           gate_encode %.3f gate_lookup %.3f gate_step %.3f gate_skip %.3f adherence_mean %.3f lr %.6e",
+            last_train_metrics["gate_encode_frac"],
+            last_train_metrics["gate_lookup_frac"],
+            last_train_metrics["gate_step_frac"],
+            last_train_metrics["gate_skip_frac"],
+            last_train_metrics["adherence_mean"],
             current_lr,
         )
         val_metrics: Optional[Dict[str, float]] = None
@@ -348,7 +370,16 @@ def main() -> None:
                 val_metrics["gate_loss"],
                 val_metrics["gate_acc"],
             )
+            logging.info(
+                "           gate_encode %.3f gate_lookup %.3f gate_step %.3f gate_skip %.3f adherence_mean %.3f",
+                val_metrics["gate_encode_frac"],
+                val_metrics["gate_lookup_frac"],
+                val_metrics["gate_step_frac"],
+                val_metrics["gate_skip_frac"],
+                val_metrics["adherence_mean"],
+            )
             best_val_acc = max(best_val_acc, val_metrics["action_acc"])
+            last_val_metrics = val_metrics
         if wandb_logger:
             payload = {
                 "epoch": epoch,
@@ -357,6 +388,11 @@ def main() -> None:
                 "train/action_acc": last_train_metrics["action_acc"],
                 "train/gate_loss": last_train_metrics["gate_loss"],
                 "train/gate_acc": last_train_metrics["gate_acc"],
+                "train/gate_encode_frac": last_train_metrics["gate_encode_frac"],
+                "train/gate_lookup_frac": last_train_metrics["gate_lookup_frac"],
+                "train/gate_step_frac": last_train_metrics["gate_step_frac"],
+                "train/gate_skip_frac": last_train_metrics["gate_skip_frac"],
+                "train/adherence_mean": last_train_metrics["adherence_mean"],
             }
             if val_metrics is not None:
                 payload.update(
@@ -365,11 +401,37 @@ def main() -> None:
                         "val/action_acc": val_metrics["action_acc"],
                         "val/gate_loss": val_metrics["gate_loss"],
                         "val/gate_acc": val_metrics["gate_acc"],
+                        "val/gate_encode_frac": val_metrics["gate_encode_frac"],
+                        "val/gate_lookup_frac": val_metrics["gate_lookup_frac"],
+                        "val/gate_step_frac": val_metrics["gate_step_frac"],
+                        "val/gate_skip_frac": val_metrics["gate_skip_frac"],
+                        "val/adherence_mean": val_metrics["adherence_mean"],
                     }
                 )
             wandb_logger.log(payload, step=epoch)
-        if scheduler is not None:
-            scheduler.step()
+    if scheduler is not None:
+        scheduler.step()
+
+    train_stats = _extract_gate_stats(last_train_metrics)
+    val_stats = _extract_gate_stats(last_val_metrics) if last_val_metrics else None
+    curriculum_alerts = _evaluate_curriculum_alerts(curriculum, train_stats)
+    if curriculum_alerts:
+        for name, info in curriculum_alerts.items():
+            logging.warning("Curriculum alert: %s %s", name, info)
+    else:
+        logging.info(
+            "Curriculum gating metrics within targets (encode %.3f lookup %.3f step %.3f adherence %.3f)",
+            train_stats["encode"],
+            train_stats["lookup"],
+            train_stats["step"],
+            train_stats["adherence_mean"],
+        )
+    if curriculum.get("enabled"):
+        curriculum["train_stats"] = train_stats
+        if val_stats:
+            curriculum["val_stats"] = val_stats
+        if curriculum_alerts:
+            curriculum["alerts"] = curriculum_alerts
 
     final_lr = optimizer.param_groups[0]["lr"] if optimizer is not None else None
 
@@ -424,7 +486,29 @@ def main() -> None:
             "wandb_project": args.wandb_project,
             "wandb_run_id": wandb_run_id,
             "wandb_mode": args.wandb_mode,
+            "curriculum": curriculum,
+            "train_gate_encode_frac": train_stats["encode"],
+            "train_gate_lookup_frac": train_stats["lookup"],
+            "train_gate_step_frac": train_stats["step"],
+            "train_gate_skip_frac": train_stats["skip"],
+            "train_adherence_mean": train_stats["adherence_mean"],
+            "train_adherence_positive_frac": train_stats["adherence_positive"],
+            "train_gate_hist": train_stats["hist"],
         }
+        if val_stats:
+            payload.update(
+                {
+                    "val_gate_encode_frac": val_stats["encode"],
+                    "val_gate_lookup_frac": val_stats["lookup"],
+                    "val_gate_step_frac": val_stats["step"],
+                    "val_gate_skip_frac": val_stats["skip"],
+                    "val_adherence_mean": val_stats["adherence_mean"],
+                    "val_adherence_positive_frac": val_stats["adherence_positive"],
+                    "val_gate_hist": val_stats["hist"],
+                }
+            )
+        if curriculum_alerts:
+            payload["curriculum_alerts"] = curriculum_alerts
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(json.dumps(payload, indent=2))
         logging.info("Metrics written to %s", args.metrics_out)
@@ -453,6 +537,9 @@ def run_epoch(
     total_examples = 0
     action_correct = 0
     gate_correct = 0
+    gate_hist = torch.zeros(model.gate_head.out_features, dtype=torch.long)
+    adherence_sum = 0.0
+    adherence_positive = 0
 
     for frames, plan_feats, gate_targets, adherence_flags, labels in loader:
         frames = frames.to(device)
@@ -481,13 +568,31 @@ def run_epoch(
         total_examples += batch_size
         action_correct += (action_logits.argmax(dim=1) == labels).sum().item()
         gate_correct += (gate_logits.argmax(dim=1) == gate_targets).sum().item()
+        adherence_sum += adherence_flags.sum().item()
+        adherence_positive += (adherence_flags > 0.5).sum().item()
+        gate_hist += torch.bincount(gate_targets.detach().cpu(), minlength=gate_hist.numel())
 
     denom = max(1, total_examples)
+    gate_total = max(1, int(gate_hist.sum().item()))
+    encode_fraction = gate_hist[GATE_INDEX_ENCODE].item() / gate_total
+    lookup_fraction = gate_hist[min(GATE_INDEX_PLAN_LOOKUP, gate_hist.numel() - 1)].item() / gate_total
+    step_fraction = gate_hist[min(GATE_INDEX_PLAN_STEP, gate_hist.numel() - 1)].item() / gate_total
+    skip_fraction = max(0.0, 1.0 - encode_fraction - lookup_fraction - step_fraction)
+    adherence_mean = adherence_sum / denom
+    adherence_positive_frac = adherence_positive / denom
     return {
         "action_loss": total_action_loss / denom,
         "action_acc": action_correct / denom,
         "gate_loss": total_gate_loss / denom,
         "gate_acc": gate_correct / denom,
+        "gate_hist": gate_hist.tolist(),
+        "gate_encode_frac": encode_fraction,
+        "gate_lookup_frac": lookup_fraction,
+        "gate_step_frac": step_fraction,
+        "gate_skip_frac": skip_fraction,
+        "adherence_mean": adherence_mean,
+        "adherence_positive_frac": adherence_positive_frac,
+        "examples": total_examples,
     }
 
 
@@ -586,6 +691,135 @@ def _save_checkpoint(path: Path, model: BattlePolicyMLP, metadata: Dict[str, obj
 
 def _trainable_parameter_count(model: nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+def _extract_gate_stats(metrics: Optional[Mapping[str, object]]) -> Dict[str, float]:
+    if not metrics:
+        return {
+            "encode": 0.0,
+            "lookup": 0.0,
+            "step": 0.0,
+            "skip": 0.0,
+            "adherence_mean": 0.0,
+            "adherence_positive": 0.0,
+            "hist": [],
+        }
+    encode = float(metrics.get("gate_encode_frac", 0.0))
+    lookup = float(metrics.get("gate_lookup_frac", 0.0))
+    step = float(metrics.get("gate_step_frac", 0.0))
+    skip = float(metrics.get("gate_skip_frac", 0.0))
+    if skip <= 0.0:
+        skip = max(0.0, 1.0 - encode - lookup - step)
+    adherence_mean = float(metrics.get("adherence_mean", 0.0))
+    adherence_positive = float(metrics.get("adherence_positive_frac", 0.0))
+    hist = metrics.get("gate_hist") or []
+    if isinstance(hist, list):
+        hist_values = [int(x) for x in hist]
+    else:
+        hist_values = []
+    return {
+        "encode": encode,
+        "lookup": lookup,
+        "step": step,
+        "skip": skip,
+        "adherence_mean": adherence_mean,
+        "adherence_positive": adherence_positive,
+        "hist": hist_values,
+    }
+
+
+def _evaluate_curriculum_alerts(curriculum: Mapping[str, object], stats: Mapping[str, float]) -> Dict[str, Dict[str, float]]:
+    heuristics = curriculum.get("gating_heuristics") if isinstance(curriculum, Mapping) else None
+    if not isinstance(heuristics, Mapping):
+        return {}
+    alerts: Dict[str, Dict[str, float]] = {}
+
+    mixed = heuristics.get("mixed_curriculum") if isinstance(heuristics, Mapping) else None
+    if isinstance(mixed, Mapping):
+        encode_band = mixed.get("encode_band")
+        lookup_band = mixed.get("plan_lookup_band")
+        step_band = mixed.get("plan_step_band")
+        adherence_target = mixed.get("adherence_target")
+
+        if isinstance(encode_band, (list, tuple)) and len(encode_band) == 2:
+            if not (encode_band[0] <= stats["encode"] <= encode_band[1]):
+                alerts["encode_band"] = {"value": stats["encode"], "band": list(encode_band)}
+        if isinstance(lookup_band, (list, tuple)) and len(lookup_band) == 2:
+            if not (lookup_band[0] <= stats["lookup"] <= lookup_band[1]):
+                alerts["plan_lookup_band"] = {"value": stats["lookup"], "band": list(lookup_band)}
+        if isinstance(step_band, (list, tuple)) and len(step_band) == 2:
+            if not (step_band[0] <= stats["step"] <= step_band[1]):
+                alerts["plan_step_band"] = {"value": stats["step"], "band": list(step_band)}
+        if isinstance(adherence_target, (int, float)) and stats["adherence_mean"] < float(adherence_target):
+            alerts["adherence_target"] = {"value": stats["adherence_mean"], "target": float(adherence_target)}
+
+    alert_cfg = heuristics.get("alerts") if isinstance(heuristics, Mapping) else None
+    if isinstance(alert_cfg, Mapping):
+        skip_threshold = alert_cfg.get("skip_spike_threshold")
+        if isinstance(skip_threshold, (int, float)) and stats["skip"] > float(skip_threshold):
+            alerts["skip_spike"] = {"value": stats["skip"], "threshold": float(skip_threshold)}
+
+    return alerts
+
+
+def _apply_curriculum_defaults(args: argparse.Namespace) -> Dict[str, object]:
+    """
+    Load curriculum config (if available) and adjust training arguments to stay in sync
+    with the Phase 5 schedule (epochs, scheduler, logging metadata).
+    """
+    curriculum_info: Dict[str, object] = {"enabled": False}
+    path = args.curriculum_config
+    if path is None:
+        default_path = Path("configs") / "train_plan.yaml"
+        if default_path.exists():
+            path = default_path
+    if path is None or not path.exists():
+        return curriculum_info
+    if yaml is None:
+        logging.warning("Curriculum config %s requested but PyYAML is not installed.", path)
+        return curriculum_info
+
+    with path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    curriculum_info["enabled"] = True
+    curriculum_info["path"] = str(path)
+
+    mix_cfg = config.get("mix") if isinstance(config, dict) else {}
+    schedule = mix_cfg.get("schedule") if isinstance(mix_cfg, dict) else None
+    scheduler_cfg = mix_cfg.get("scheduler") if isinstance(mix_cfg, dict) else {}
+    sampler_cfg = mix_cfg.get("sampler") if isinstance(mix_cfg, dict) else {}
+
+    if schedule:
+        curriculum_info["schedule"] = schedule
+        final_stage = schedule[-1]
+        end_epoch = int(final_stage.get("end_epoch", args.epochs))
+        if end_epoch > args.epochs:
+            logging.info("Curriculum extending epochs from %d -> %d", args.epochs, end_epoch)
+            args.epochs = end_epoch
+        curriculum_info["target_mix"] = {
+            "battle_fraction": final_stage.get("battle_fraction"),
+            "overworld_fraction": final_stage.get("overworld_fraction"),
+        }
+
+    scheduler_type = scheduler_cfg.get("type")
+    if scheduler_type:
+        args.scheduler = scheduler_type.lower()
+    if scheduler_cfg.get("min_lr") is not None:
+        args.scheduler_min_lr = float(scheduler_cfg["min_lr"])
+    if scheduler_cfg.get("warmup_epochs") is not None:
+        args.scheduler_warmup_epochs = int(scheduler_cfg["warmup_epochs"])
+    if scheduler_cfg.get("total_epochs") is not None:
+        args.scheduler_total_epochs = int(scheduler_cfg["total_epochs"])
+    curriculum_info["scheduler_config"] = scheduler_cfg
+
+    curriculum_info["sampler"] = sampler_cfg
+    curriculum_info["augmentations"] = config.get("augmentations")
+    curriculum_info["gating_heuristics"] = config.get("gating_heuristics")
+
+    overworld_req = config.get("overworld_requirements") if isinstance(config, dict) else {}
+    curriculum_info["telemetry_sources"] = overworld_req.get("telemetry_sources")
+
+    return curriculum_info
 
 
 if __name__ == "__main__":

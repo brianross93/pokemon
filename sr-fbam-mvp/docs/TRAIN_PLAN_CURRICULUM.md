@@ -40,5 +40,46 @@ This document expands on the knobs defined in `configs/train_plan.yaml` and capt
 ## Next Steps
 
 1. Populate real corpus paths in `configs/train_plan.yaml` once telemetry landing zones are ready.  
-2. Wire the sampler to consume the YAML via Hydra or equivalent config system.  
-3. Add monitoring hooks that compare live gate metrics against the thresholds above and surface alerts to the training dashboard.
+2. Use `scripts/build_plan_feature_store.py --config configs/train_plan.yaml` to materialise mixed-mode feature stores and weights.  
+3. Wire the sampler to consume the YAML via Hydra or equivalent config system.  
+4. Add monitoring hooks that compare live gate metrics against the thresholds above and surface alerts to the training dashboard.
+
+## Trainer Integration
+
+Use the updated trainer to stay in sync with the curriculum schedule:
+
+```bash
+python -m src.training.train_battle_il \
+  --train data/planlets/battle_train.jsonl \
+  --epochs 2 \  # overridden by curriculum config if smaller
+  --batch-size 64 \
+  --curriculum-config configs/train_plan.yaml \
+  --metrics-out results/train_plan/metrics.json
+```
+
+When `--curriculum-config` is supplied (defaults to `configs/train_plan.yaml` when present), the trainer:
+
+- Adjusts epochs to the final curriculum stage.  
+- Applies scheduler hints (type, warmup, min LR, total epochs).  
+- Logs sampler, augmentation, and gating heuristics into the output metrics (and W&B if enabled).
+
+Override the scheduler or epochs explicitly to experiment with alternate mixes; all overrides are still captured in metrics for later comparison.
+
+## Automation Helpers
+
+- Run the LR scheduler sweeps captured in `configs/schedules/*.json`:
+
+  ```bash
+  python scripts/run_scheduler_sweeps.py \
+    --schedules configs/schedules/*.json \
+    --battle data/planlets/battle_train.jsonl \
+    --curriculum-config configs/train_plan.yaml
+  ```
+
+- Summarise metrics/alerts for dashboards:
+
+  ```bash
+  python scripts/check_train_plan_metrics.py \
+    --metrics results/train_plan/metrics.json \
+    --output results/train_plan/summary.json
+  ```

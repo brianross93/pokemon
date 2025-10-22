@@ -8,8 +8,8 @@ from typing import Dict, Iterable, List, Mapping
 import torch
 from torch.utils.data import Dataset
 
-from data.frame_dataset import frame_text_to_tensor
-from plan.features import PLAN_FEATURE_DIM, build_plan_feature_vector
+from src.data.frame_dataset import frame_text_to_tensor
+from src.plan.features import PLAN_FEATURE_DIM, build_plan_feature_vector
 
 _GATE_MODE_TO_INDEX = {
     "WRITE": 0,
