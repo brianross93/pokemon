@@ -1,0 +1,38 @@
+*** Begin Patch
+*** Update File: sr-fbam-mvp/scripts/run_overworld_controller.py
+@@
+     def _encode_observation(observation: Optional[OverworldObservation]) -> Optional[bytes]:
+         if observation is None:
+             return None
+         try:
+             from io import BytesIO
+             from PIL import Image
+         except ImportError:
+             return None
+ 
+         frame = getattr(observation, "raw_framebuffer", None)
+         if frame is None:
+             frame = getattr(observation, "framebuffer", None)
+         if frame is None:
+             return None
+         try:
+             image = Image.fromarray(frame.astype("uint8", copy=False))
+             buffer = BytesIO()
+             image.save(buffer, format="PNG")
+             return buffer.getvalue()
+         except Exception:
+             return None
+ 
++
++def _deep_merge(target: Dict[str, Any], updates: Mapping[str, Any]) -> None:
++    for key, value in updates.items():
++        if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
++            _deep_merge(target[key], value)  # type: ignore[index]
++        elif isinstance(value, list) and isinstance(target.get(key), list):
++            target[key] = list(value)
++        else:
++            target[key] = copy.deepcopy(value)
++
+ 
+ def _serialise_args(args: argparse.Namespace) -> Dict[str, Any]:
+*** End Patch

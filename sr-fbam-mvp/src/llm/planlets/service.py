@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from pkmn_battle.graph.memory import GraphMemory
 from pkmn_battle.summarizer import GraphSummary, summarize_for_llm
@@ -12,6 +12,20 @@ from ..llm_client import LLMClient, LLMConfig
 from .proposer import PlanletProposal, PlanletProposer
 from src.plan.storage import PlanletRecord, PlanletStore
 from src.plan.cache import PlanCache, CacheHit
+
+OVERWORLD_PLANLET_KINDS = {
+    "NAVIGATE_TO",
+    "HEAL_AT_CENTER",
+    "BUY_ITEM",
+    "TALK_TO",
+    "OPEN_MENU",
+    "MENU_SEQUENCE",
+    "USE_ITEM",
+    "INTERACT",
+    "PICKUP_ITEM",
+    "WAIT",
+    "HANDLE_ENCOUNTER",
+}
 
 
 @dataclass
@@ -70,6 +84,8 @@ class PlanletService:
         *,
         nearby_limit: int = 5,
         allow_search: bool = True,
+        frame_image: Optional[bytes] = None,
+        mission_plan: Optional[Mapping[str, Any]] = None,
     ) -> PlanletProposal:
         world_summary = summarize_world_for_llm(memory, nearby_limit=nearby_limit)
         graph_summary = GraphSummary(
@@ -94,7 +110,13 @@ class PlanletService:
             format=world_summary.map_id,
             data={"overworld": world_summary.to_payload()},
         )
-        proposal = self.proposer.generate_planlet(graph_summary, self.client, allow_search=allow_search)
+        proposal = self.proposer.generate_planlet(
+            graph_summary,
+            self.client,
+            allow_search=allow_search,
+            frame_image=frame_image,
+            mission_plan=mission_plan,
+        )
         proposal.cache_key = cache_key
         self._persist_planlet(world_summary, proposal)
         if self.cache is not None and cache_key is not None:
@@ -158,7 +180,7 @@ class PlanletService:
         raw_upper = raw_kind.upper()
         if raw_upper == "BATTLE":
             mode = "battle"
-        elif raw_upper == "OVERWORLD":
+        elif raw_upper in OVERWORLD_PLANLET_KINDS:
             mode = "overworld"
         else:
             mode = raw_kind.lower() or "battle"

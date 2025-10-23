@@ -148,14 +148,17 @@ def test_planlet_service_overworld_cache() -> None:
     planlet_response = json.dumps(
         {
             "planlet_id": "pl_overworld",
-            "kind": "OVERWORLD",
+            "id": "pl_overworld",
+            "kind": "MENU_SEQUENCE",
             "seed_frame_id": 0,
             "format": "map",
             "side": "p1",
-            "goal": "Walk north",
+            "goal": "Open menu",
+            "args": {"buttons": ["START", "A"]},
             "script": [
-                {"op": "NAVIGATE", "actor": "player", "target": {"tile": [0, 1]}},
+                {"op": "MENU_SEQUENCE", "buttons": ["START", "A"]},
             ],
+            "timeout_steps": 120,
         }
     )
     client = _CountingLLM(planlet_response)
@@ -163,7 +166,7 @@ def test_planlet_service_overworld_cache() -> None:
     service = PlanletService(proposer=PlanletProposer(), client=client, cache=cache)
 
     first = service.request_overworld_planlet(memory, allow_search=False)
-    assert first.planlet["kind"] == "OVERWORLD"
+    assert first.planlet["kind"] == "MENU_SEQUENCE"
     assert first.cache_hit is False
     assert first.cache_key is not None
 

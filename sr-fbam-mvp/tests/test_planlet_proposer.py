@@ -28,7 +28,7 @@ def test_planlet_proposer_stub_validates_schema():
     proposal = proposer.propose_stub(summary)
 
     assert proposal.planlet["planlet_id"] == "stub_4"
-    assert proposal.planlet["kind"] in {"BATTLE", "OVERWORLD"}
+    assert proposal.planlet["kind"] in {"BATTLE", "MENU_SEQUENCE"}
     assert proposal.planlet["side"] == "p1"
     assert proposal.planlet["script"]
     assert proposal.search_calls == 0

@@ -6,9 +6,10 @@ to an LLM planner.
 """
 
 from .pokemon_adapter import (  # noqa: F401
+    ObservationBundle,
     PokemonAction,
     PokemonBlueAdapter,
-    PokemonTelemetry,
+    PokemonObservation,
 )
 from .controller import (  # noqa: F401
     GateDecision,

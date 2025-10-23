@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -13,7 +14,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
+from concurrent.futures import ThreadPoolExecutor, Future
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -24,12 +26,19 @@ if str(SRC_ROOT) not in sys.path:
 
 from scripts.capture_overworld_telemetry import _policy_bootstrap  # reuse menu navigation helper
 
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None
+
 from src.llm.llm_client import LLMConfig, MockLLMClient, create_llm_client
 from src.llm.planlets import FakeOverworldLLM, PlanletProposer, PlanletService
 from src.middleware.pokemon_adapter import PokemonAction
 from src.middleware.pyboy_adapter import PyBoyConfig, PyBoyPokemonAdapter
-from src.overworld.env.overworld_adapter import OverworldAdapter
+from src.overworld.env.overworld_adapter import OverworldAdapter, OverworldObservation
 from src.overworld.recording import OverworldTraceRecorder
+from src.overworld.recording.trace_recorder import TraceValidationError
+from src.overworld.ram_map import DEFAULT_OVERWORLD_RAM_MAP
 from src.plan.cache import PlanCache
 from src.plan.planner_llm import PlanBundle, PlanletSpec
 from src.plan.compiler import PlanCompilationError, PlanCompiler
@@ -55,16 +64,28 @@ def parse_args() -> argparse.Namespace:
         help="Use menu policy to reach the overworld instead of deterministic boot macros.",
     )
     parser.add_argument("--window", type=str, default="null", help="PyBoy window backend (null|SDL2).")
+    parser.add_argument(
+        "--emulation-speed",
+        type=float,
+        default=1.0,
+        help="PyBoy emulation speed multiplier (1.0 approximates real-time, 0 for unlimited).",
+    )
+    parser.add_argument(
+        "--max-frame-skip",
+        type=int,
+        default=5,
+        help="Maximum frames PyBoy may skip to maintain speed.",
+    )
     parser.add_argument("--frames-per-step", type=int, default=12, help="Frames to wait on wait actions.")
     parser.add_argument("--seed", type=int, default=1337, help="Random seed for exploration targets.")
     parser.add_argument(
         "--planner-backend",
         type=str,
-        default="fake",
+        default="openai",
         choices=["none", "fake", "mock", "openai", "anthropic"],
         help="Planner backend to use for planlet generation.",
     )
-    parser.add_argument("--planner-model", type=str, help="Override planner model identifier.")
+    parser.add_argument("--planner-model", type=str, default="gpt-5", help="Override planner model identifier.")
     parser.add_argument("--planner-api-key", type=str, help="API key for planner backend (env fallback).")
     parser.add_argument("--planner-base-url", type=str, help="Optional API base URL override.")
     parser.add_argument("--planner-store", type=Path, help="Directory to persist emitted planlets.")
@@ -122,13 +143,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def to_executor_observation(observation, adapter: PyBoyPokemonAdapter) -> Dict[str, object]:
-    data = {
-        "frame": observation.frame,
-        "overworld": dict(observation.overworld),
-        "ram": adapter.snapshot_overworld_ram(),
-    }
-    return data
+def ingest_overworld_observation(
+    executor: OverworldExecutor,
+    observation: OverworldObservation,
+) -> Mapping[str, object]:
+    writes = executor.extractor.extract(observation)
+    for op in writes:
+        executor.memory.write(op)
+    executor._last_observation = observation  # keep executor memo in sync
+    snapshot = executor.extractor.last_payload or {}
+    return dict(snapshot) if isinstance(snapshot, Mapping) else {}
+
+
+def extract_step_counter_from_observation(observation: OverworldObservation) -> Optional[int]:
+    metadata = observation.metadata or {}
+    for key in ("step_counter", "overworld_step_counter", "progress_step", "stepCount"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+
+    ram_snapshot = observation.ram
+    if isinstance(ram_snapshot, Mapping):
+        addr = DEFAULT_OVERWORLD_RAM_MAP.get("step_counter")
+        if addr is not None:
+            raw_value = ram_snapshot.get(addr)
+            if raw_value is not None:
+                try:
+                    return int(raw_value)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+DEFAULT_MISSION_PLAN: Dict[str, Any] = {
+    "mission": "Defeat the Elite Four and collect all eight badges.",
+    "progress": {
+        "badges_collected": 0,
+        "current_objective": "Leave the bedroom and reach Professor Oak's lab."
+    },
+    "planlets": {
+        "pending": [],
+        "completed": []
+    },
+    "notes": []
+}
 
 
 class PlanCoordinator:
@@ -143,6 +205,7 @@ class PlanCoordinator:
         nearby_limit: int,
         backend_label: str,
         logger: logging.Logger,
+        mission_plan: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.executor = executor
         self.service = service
@@ -153,6 +216,8 @@ class PlanCoordinator:
         self._plan_seq = 0
         self._planlet_seq = 0
         self._last_source = backend_label if service is not None else "planner-unavailable"
+        self._mission_plan: Dict[str, Any] = copy.deepcopy(mission_plan or DEFAULT_MISSION_PLAN)
+        self._search_notice_logged = False
 
     def has_planner(self) -> bool:
         return self.service is not None
@@ -160,14 +225,29 @@ class PlanCoordinator:
     def describe_last_source(self) -> str:
         return self._last_source
 
-    def request_bundle(self, observation: Dict[str, object], *, reason: str) -> PlanBundle:
+    def request_bundle(
+        self,
+        context: Optional[Mapping[str, object]],
+        *,
+        reason: str,
+        observation: Optional[OverworldObservation] = None,
+    ) -> PlanBundle:
         if self.service is None:
             raise RuntimeError("Planner backend not configured; cannot produce planlets.")
+        if self.allow_search and not self._search_notice_logged:
+            self._logger.info(
+                "Web search tool enabled; planner may issue external queries (incurring additional API cost)."
+            )
+            self._search_notice_logged = True
+        frame_bytes = self._encode_observation(observation)
+        mission_plan_payload = self._mission_plan_for_prompt()
         try:
             proposal = self.service.request_overworld_planlet(
                 self.executor.memory,
                 nearby_limit=self.nearby_limit,
                 allow_search=self.allow_search,
+                frame_image=frame_bytes,
+                mission_plan=mission_plan_payload,
             )
         except Exception as exc:
             self._logger.exception("Planlet service failed (reason=%s)", reason)
@@ -187,6 +267,7 @@ class PlanCoordinator:
 
     def _bundle_from_proposal(self, proposal: Any, reason: str) -> PlanBundle:
         payload = dict(getattr(proposal, "planlet", {}) or {})
+        updates = payload.pop("updates", None)
         planlet_id = str(
             payload.get("id")
             or payload.get("planlet_id")
@@ -226,6 +307,8 @@ class PlanCoordinator:
             "cache_hit": bool(getattr(proposal, "cache_hit", False)),
             "cache_key": getattr(proposal, "cache_key", None),
         }
+        if updates:
+            raw_bundle["updates"] = updates
         token_usage = getattr(proposal, "token_usage", None)
         if token_usage:
             raw_bundle["token_usage"] = token_usage
@@ -266,6 +349,105 @@ class PlanCoordinator:
     def _next_planlet_id(self) -> str:
         self._planlet_seq += 1
         return f"ow_planlet_{int(time.time() * 1000)}_{self._planlet_seq}"
+
+    @staticmethod
+    def _encode_observation(observation: Optional[OverworldObservation]) -> Optional[bytes]:
+        if observation is None:
+            return None
+        try:
+            from io import BytesIO
+            from PIL import Image
+        except ImportError:
+            return None
+
+        frame = getattr(observation, "raw_framebuffer", None)
+        if frame is None:
+            frame = getattr(observation, "framebuffer", None)
+        if frame is None:
+            return None
+        try:
+            image = Image.fromarray(frame.astype("uint8", copy=False))
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+        except Exception:
+            return None
+
+    def _mission_plan_for_prompt(self) -> Dict[str, Any]:
+        plan = copy.deepcopy(self._mission_plan)
+        planlets_section = plan.setdefault("planlets", {})
+        state = getattr(self.executor, "state", None)
+        active: List[Dict[str, Any]] = []
+        if state is not None:
+            if state.current_planlet is not None:
+                spec = state.current_planlet.spec
+                active.append(
+                    {
+                        "id": spec.id,
+                        "kind": spec.kind,
+                        "timeout_steps": spec.timeout_steps,
+                    }
+                )
+            for queued in list(state.plan_queue or []):
+                spec = queued.spec
+                active.append(
+                    {
+                        "id": spec.id,
+                        "kind": spec.kind,
+                        "timeout_steps": spec.timeout_steps,
+                    }
+                )
+        planlets_section["active"] = active
+        planlets_section.setdefault("pending", [])
+        planlets_section.setdefault("completed", [])
+        return plan
+
+    def register_plan_bundle(self, plan: "CompiledPlan", reason: str) -> None:
+        pending = self._mission_plan.setdefault("planlets", {}).setdefault("pending", [])
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for compiled_planlet in plan.planlets:
+            entry = {
+                "id": compiled_planlet.spec.id,
+                "kind": compiled_planlet.spec.kind,
+                "goal": plan.goal,
+                "loaded_at": timestamp,
+                "reason": reason,
+            }
+            pending.append(entry)
+
+    def apply_updates(self, updates: Optional[Mapping[str, Any]]) -> None:
+        if not updates:
+            return
+        _deep_merge(self._mission_plan, updates)
+
+    def mark_planlet_completed(self, planlet_id: Optional[str]) -> None:
+        if not planlet_id:
+            return
+        planlets_section = self._mission_plan.setdefault("planlets", {})
+        pending = planlets_section.setdefault("pending", [])
+        completed = planlets_section.setdefault("completed", [])
+        for index, entry in enumerate(list(pending)):
+            if entry.get("id") == planlet_id:
+                pending.pop(index)
+                entry = dict(entry)
+                entry["completed_at"] = datetime.now(timezone.utc).isoformat()
+                completed.append(entry)
+                break
+
+    def handle_plan_event(self, event: Any) -> None:
+        status = getattr(event, "status", "")
+        if status == "PLANLET_COMPLETE":
+            self.mark_planlet_completed(getattr(event, "planlet_id", None))
+
+
+def _deep_merge(target: Dict[str, Any], updates: Mapping[str, Any]) -> None:
+    for key, value in updates.items():
+        if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
+            _deep_merge(target[key], value)  # type: ignore[index]
+        elif isinstance(value, list) and isinstance(target.get(key), list):
+            target[key] = list(value)
+        else:
+            target[key] = copy.deepcopy(value)
 
 
 def _serialise_args(args: argparse.Namespace) -> Dict[str, Any]:
@@ -345,19 +527,6 @@ def _write_run_metadata(path: Path, metadata: Mapping[str, Any]) -> None:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
 
-def _extract_step_counter(observation: Mapping[str, object]) -> Optional[int]:
-    if not isinstance(observation, Mapping):
-        return None
-    overworld = observation.get("overworld")
-    if not isinstance(overworld, Mapping):
-        return None
-    value = overworld.get("step_counter")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def action_to_pokemon(action: Dict[str, object], *, frames_per_step: int) -> PokemonAction:
     kind = str(action.get("kind", "")).lower()
     if kind == "button":
@@ -427,6 +596,11 @@ def build_planlet_service(
             if not api_key:
                 api_key = os.getenv("PLANNER_API_KEY")
 
+        if backend in {"openai", "anthropic"} and not api_key:
+            raise RuntimeError(
+                f"{backend.title()} API key not provided. Set the appropriate environment variable or pass --planner-api-key."
+            )
+
         base_url = args.planner_base_url
         if not base_url and backend == "openai":
             base_url = os.getenv("OPENAI_BASE_URL")
@@ -436,7 +610,6 @@ def build_planlet_service(
             api_key=api_key,
             base_url=base_url,
         )
-        config.response_format = {"type": "json_object"}
         client = create_llm_client(config)
         backend_label = backend
 
@@ -445,14 +618,22 @@ def build_planlet_service(
 
 
 def main() -> int:
+    if load_dotenv is not None:
+        load_dotenv()
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-    cfg = PyBoyConfig(rom_path=str(args.rom), window_type=args.window)
+    cfg = PyBoyConfig(
+        rom_path=str(args.rom),
+        window_type=args.window,
+        speed=float(args.emulation_speed),
+        max_frame_skip=int(args.max_frame_skip),
+    )
     adapter = PyBoyPokemonAdapter(cfg)
     overworld = OverworldAdapter(adapter)
 
     executor = OverworldExecutor()
+    mission_plan = copy.deepcopy(DEFAULT_MISSION_PLAN)
     planner_service, backend_label = build_planlet_service(args)
     if planner_service is None:
         LOGGER.error("Planner backend is required; configure --planner-backend with a supported value.")
@@ -465,6 +646,7 @@ def main() -> int:
         nearby_limit=args.planner_nearby_limit,
         backend_label=backend_label,
         logger=LOGGER,
+        mission_plan=mission_plan,
     )
     if planner_service is None:
         LOGGER.info("Planner backend disabled; relying on deterministic menu plans only.")
@@ -505,21 +687,25 @@ def main() -> int:
     if args.policy_boot:
         observation = _policy_bootstrap(overworld, observation, frames_per_step=args.frames_per_step)
 
-    obs_payload = to_executor_observation(observation, adapter)
-    last_observation = obs_payload
+    last_observation_obj: OverworldObservation = observation
+    last_snapshot = ingest_overworld_observation(executor, last_observation_obj)
     planlet_watchdog_threshold = max(0, int(args.planlet_watchdog_steps or 0))
     stall_watchdog_threshold = max(0, int(args.stall_watchdog_steps or 0))
     planlet_watchdog_steps = 0
     stall_watchdog_steps = 0
     last_planlet_id: Optional[str] = None
-    last_step_counter = _extract_step_counter(obs_payload)
+    last_step_counter = extract_step_counter_from_observation(observation)
+    planner_failure_count = 0
+    planner_failure_limit = 5
+    planner_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="planner")
+    pending_plan: Optional[Dict[str, Any]] = None
 
     def load_plan_bundle(
         bundle: PlanBundle,
-        current_observation: Dict[str, object],
+        planner_snapshot: Mapping[str, object],
         *,
         reason: str,
-    ) -> None:
+    ) -> bool:
         plan_metadata = dict(getattr(bundle, "raw", {}).get("metadata") or {})
         plan_metadata.setdefault("planner_reason", reason)
         plan_metadata.setdefault("plan_source", plan_coordinator.describe_last_source())
@@ -527,7 +713,7 @@ def main() -> int:
             compiled = compiler.compile(bundle)
         except PlanCompilationError:
             LOGGER.exception("Failed to compile plan bundle (reason=%s).", reason)
-            return
+            return False
         executor.load_compiled_plan(compiled, metadata=plan_metadata)
         LOGGER.info(
             "Loaded plan %s (%d planlets) source=%s reason=%s",
@@ -536,21 +722,82 @@ def main() -> int:
             plan_coordinator.describe_last_source(),
             reason,
         )
+        plan_coordinator.register_plan_bundle(compiled, reason)
+        updates = getattr(bundle, "raw", {}).get("updates") if hasattr(bundle, "raw") else None
+        plan_coordinator.apply_updates(updates)
+        return True
 
-    def load_new_plan(reason: str, current_observation: Dict[str, object]) -> None:
-        try:
-            bundle = plan_coordinator.request_bundle(current_observation, reason=reason)
-        except RuntimeError as exc:
-            LOGGER.error("No plan available after planner failure (reason=%s): %s", reason, exc)
+    def load_new_plan(
+        reason: str,
+        planner_snapshot: Mapping[str, object],
+        *,
+        observation_obj: OverworldObservation,
+    ) -> None:
+        nonlocal pending_plan
+        if pending_plan is not None:
             return
-        load_plan_bundle(bundle, current_observation, reason=reason)
+        snapshot_copy = copy.deepcopy(planner_snapshot)
+        observation_ref = observation_obj
+        started_at = time.perf_counter()
 
-    def ensure_plan(current_observation: Dict[str, object], *, reason: str) -> None:
+        def _invoke() -> PlanBundle:
+            return plan_coordinator.request_bundle(
+                snapshot_copy,
+                reason=reason,
+                observation=observation_ref,
+            )
+
+        future = planner_pool.submit(_invoke)
+        pending_plan = {
+            "future": future,
+            "reason": reason,
+            "snapshot": snapshot_copy,
+            "started_at": started_at,
+        }
+        LOGGER.debug("Scheduled planner request (reason=%s)", reason)
+
+    def finalize_pending_plan(*, block: bool = False) -> Optional[bool]:
+        nonlocal pending_plan, planner_failure_count, planlet_watchdog_steps, last_planlet_id
+        if pending_plan is None:
+            return None
+        future: Future = pending_plan["future"]
+        if not future.done():
+            if not block:
+                return None
+        try:
+            bundle = future.result()
+        except Exception as exc:
+            reason = pending_plan.get("reason", "unknown")
+            LOGGER.error("No plan available after planner failure (reason=%s): %s", reason, exc)
+            planner_failure_count += 1
+            pending_plan = None
+            return False
+        reason = pending_plan.get("reason", "unknown")
+        snapshot_payload = pending_plan.get("snapshot", last_snapshot)
+        started_at = pending_plan.get("started_at")
+        pending_plan = None
+        if isinstance(started_at, (int, float)):
+            elapsed = time.perf_counter() - started_at
+            LOGGER.info("Planner completed (reason=%s) in %.2fs", reason, elapsed)
+        if not load_plan_bundle(bundle, snapshot_payload, reason=reason):
+            planner_failure_count += 1
+            return False
+        planner_failure_count = 0
+        planlet_watchdog_steps = 0
+        last_planlet_id = None
+        return True
+
+    def ensure_plan(
+        planner_snapshot: Mapping[str, object],
+        *,
+        reason: str,
+        observation_obj: OverworldObservation,
+    ) -> None:
         if executor.state.current_planlet is not None or executor.state.plan_queue:
             return
-        load_new_plan(reason, current_observation)
+        load_new_plan(reason, planner_snapshot, observation_obj=observation_obj)
 
-    def replan_handler(event) -> PlanBundle:
+    def replan_handler(event) -> Optional[PlanBundle]:
         status = getattr(event, "status", None)
         reason = getattr(event, "reason", None)
         LOGGER.info(
@@ -561,52 +808,73 @@ def main() -> int:
         )
         tag_components = [str(part) for part in (status, reason) if part]
         tag = ":".join(tag_components) if tag_components else "replan"
-        return plan_coordinator.request_bundle(last_observation, reason=tag)
+        observation_ref = executor._last_observation or last_observation_obj
+        load_new_plan(tag, last_snapshot, observation_obj=observation_ref)
+        return None
 
     executor.register_replan_handler(replan_handler)
-    if recorder is not None:
-        def _plan_event_logger(event) -> None:
-            plan_payload = {
-                "id": event.plan_id,
-                "planlet_id": event.planlet_id,
-                "planlet_kind": event.planlet_kind,
-            }
-            metadata = getattr(event, "metadata", None)
-            if isinstance(metadata, dict):
-                plan_payload.update(metadata)
-            context = {
-                "domain": "overworld",
-                "status": event.status,
-                "step_index": event.step_index,
-                "plan": plan_payload,
-            }
-            if event.reason:
-                context["reason"] = event.reason
-            payload = {
-                "source": "overworld.controller.plan_event",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "context": context,
-                "telemetry": event.telemetry,
-            }
-            if event.trace:
-                payload["observation"] = {"trace": event.trace}
-            try:
-                recorder.record(payload)
-            except Exception:
-                LOGGER.exception("Failed to record plan event telemetry.")
+    def _plan_event_logger(event) -> None:
+        plan_coordinator.handle_plan_event(event)
+        if recorder is None:
+            return
+        plan_payload = {
+            "id": event.plan_id,
+            "planlet_id": event.planlet_id,
+            "planlet_kind": event.planlet_kind,
+        }
+        metadata = getattr(event, "metadata", None)
+        if isinstance(metadata, dict):
+            plan_payload.update(metadata)
+        context = {
+            "domain": "overworld",
+            "status": event.status,
+            "step_index": event.step_index,
+            "plan": plan_payload,
+        }
+        if event.reason:
+            context["reason"] = event.reason
+        payload = {
+            "source": "overworld.controller.plan_event",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "context": context,
+            "telemetry": event.telemetry,
+        }
+        if event.trace:
+            payload["observation"] = {"trace": event.trace}
+        try:
+            recorder.record(payload)
+        except Exception:
+            LOGGER.exception("Failed to record plan event telemetry.")
 
-        executor.register_event_sink(_plan_event_logger)
-    ensure_plan(obs_payload, reason="initial")
+    executor.register_event_sink(_plan_event_logger)
+    try:
+        ensure_plan(last_snapshot, reason="initial", observation_obj=last_observation_obj)
+    except Exception:
+        LOGGER.exception("Planner failed during initial plan request.")
+        return 1
 
     step = 0
     try:
         while running and step < args.steps:
+            finalize_outcome = finalize_pending_plan()
+            if finalize_outcome is False and planner_failure_count >= planner_failure_limit:
+                LOGGER.error("Planner failure threshold reached; aborting run.")
+                break
             try:
-                result = executor.step(obs_payload)
+                result = executor.step(observation)
+            except TraceValidationError as exc:
+                LOGGER.error("Trace recorder validation failed: %s", exc)
+                break
             except Exception:
                 LOGGER.exception("Executor step failed; forcing replan.")
-                load_new_plan("executor_error", obs_payload)
+                last_snapshot = ingest_overworld_observation(executor, observation)
+                last_observation_obj = observation
+                load_new_plan("executor_error", last_snapshot, observation_obj=observation)
                 continue
+
+            snapshot_view = executor.extractor.last_payload
+            if isinstance(snapshot_view, Mapping):
+                last_snapshot = dict(snapshot_view)
 
             pokemon_action = action_to_pokemon(result.action, frames_per_step=args.frames_per_step)
             try:
@@ -614,11 +882,14 @@ def main() -> int:
             except Exception:
                 LOGGER.exception("PyBoy adapter step failed; forcing replan.")
                 time.sleep(0.1)
-                load_new_plan("adapter_error", obs_payload)
+                last_snapshot = ingest_overworld_observation(executor, observation)
+                last_observation_obj = observation
+                last_step_counter = extract_step_counter_from_observation(observation)
+                load_new_plan("adapter_error", last_snapshot, observation_obj=observation)
                 continue
 
-            obs_payload = to_executor_observation(observation, adapter)
-            last_observation = obs_payload
+            current_counter = extract_step_counter_from_observation(observation)
+            last_observation_obj = observation
 
             active_planlet = getattr(executor.state.current_planlet, "spec", None)
             if active_planlet is not None:
@@ -637,13 +908,18 @@ def main() -> int:
                     last_planlet_id,
                     planlet_watchdog_steps,
                 )
-                load_new_plan("watchdog_planlet", obs_payload)
+                last_snapshot = ingest_overworld_observation(executor, observation)
+                last_observation_obj = observation
+                load_new_plan("watchdog_planlet", last_snapshot, observation_obj=observation)
                 planlet_watchdog_steps = 0
                 last_planlet_id = None
+                stall_watchdog_steps = 0
+                last_step_counter = current_counter
                 continue
 
-            if stall_watchdog_threshold > 0:
-                current_counter = _extract_step_counter(obs_payload)
+            if pending_plan is not None:
+                stall_watchdog_steps = 0
+            elif stall_watchdog_threshold > 0:
                 if current_counter is None or last_step_counter is None:
                     stall_watchdog_steps = 0
                 elif current_counter == last_step_counter:
@@ -662,10 +938,10 @@ def main() -> int:
                         try:
                             adapter.load_state(args.watchdog_save_slot)
                             observation = overworld.observe()
-                            obs_payload = to_executor_observation(observation, adapter)
-                            last_observation = obs_payload
-                            last_step_counter = _extract_step_counter(obs_payload)
-                            ensure_plan(obs_payload, reason="watchdog_stall_reload")
+                            last_snapshot = ingest_overworld_observation(executor, observation)
+                            last_observation_obj = observation
+                            last_step_counter = extract_step_counter_from_observation(observation)
+                            ensure_plan(last_snapshot, reason="watchdog_stall_reload", observation_obj=observation)
                             LOGGER.info(
                                 "Reloaded PyBoy save-state slot %s after stall.",
                                 args.watchdog_save_slot,
@@ -677,15 +953,31 @@ def main() -> int:
                                 args.watchdog_save_slot,
                             )
                     if not recovered:
-                        load_new_plan("watchdog_stall_replan", obs_payload)
-                        last_step_counter = _extract_step_counter(obs_payload)
+                        last_snapshot = ingest_overworld_observation(executor, observation)
+                        last_observation_obj = observation
+                        load_new_plan("watchdog_stall_replan", last_snapshot, observation_obj=observation)
+                        last_step_counter = extract_step_counter_from_observation(observation)
                     continue
 
             if result.status in {"PLANLET_COMPLETE", "PLANLET_STALLED", "PLAN_COMPLETE"}:
-                ensure_plan(obs_payload, reason=f"executor_status:{result.status}")
+                last_snapshot = ingest_overworld_observation(executor, observation)
+                last_observation_obj = observation
+                ensure_plan(last_snapshot, reason=f"executor_status:{result.status}", observation_obj=observation)
+
+            last_step_counter = current_counter
 
             step += 1
     finally:
+        try:
+            finalize_pending_plan(block=False)
+        except Exception:
+            LOGGER.exception("Failed to finalise pending planner request during shutdown.")
+        if pending_plan is not None:
+            future_obj = pending_plan.get("future")
+            if isinstance(future_obj, Future):
+                future_obj.cancel()
+            pending_plan = None
+        planner_pool.shutdown(wait=False)
         if recorder is not None:
             recorder.close()
         adapter.close()

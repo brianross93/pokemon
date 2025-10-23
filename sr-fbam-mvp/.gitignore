@@ -8,7 +8,7 @@ data
 sr-fbam-mvp/data
 # Ignore raw evaluation outputs (reproducible)
 results/raw/
-
+runs/
 # Bytecode
 __pycache__/
 *.pyc

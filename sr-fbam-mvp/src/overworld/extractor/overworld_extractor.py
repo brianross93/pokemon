@@ -5,8 +5,11 @@ Prototype overworld extractor that emits nodes and edges consumable by SR-FBAM.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Tuple, Union
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple, Union
 
+import numpy as np
+
+from src.overworld.env.overworld_adapter import OverworldObservation
 from src.pkmn_battle.graph.schema import Edge, Node, WriteOp
 from ..ram_map import DEFAULT_OVERWORLD_RAM_MAP, decode_facing
 
@@ -33,22 +36,100 @@ class OverworldExtractor:
 
     def __init__(self, *, ram_map: Mapping[str, int] = DEFAULT_OVERWORLD_RAM_MAP) -> None:
         self._ram_map = dict(ram_map)
+        self._last_payload: Optional[Mapping[str, object]] = None
 
-    def extract(self, observation: Mapping[str, object]) -> List[WriteOp]:
-        if "overworld" in observation:
-            data = observation["overworld"]
-            if not isinstance(data, Mapping):
-                return []
-        else:
-            data = observation
+    # ------------------------------------------------------------------ #
+    # Observation normalisation
+    # ------------------------------------------------------------------ #
 
-        ram_snapshot = observation.get("ram")
-        if ram_snapshot is not None:
-            decoded = self._decode_ram_snapshot(ram_snapshot)
-            data = self._merge_overworld(decoded, data)
+    def _normalise_observation(
+        self, observation: Union[OverworldObservation, Mapping[str, object]]
+    ) -> Mapping[str, object]:
+        if isinstance(observation, OverworldObservation):
+            visual = self._decode_visual(observation)
+            payload: Dict[str, object] = {
+                "frame": {
+                    "hash": observation.frame_hash(),
+                    "shape": tuple(int(dim) for dim in observation.framebuffer.shape[:2]),
+                    "metadata": dict(observation.metadata),
+                },
+                "overworld": visual,
+                "ram": dict(observation.ram) if isinstance(observation.ram, Mapping) else observation.ram,
+            }
+            if observation.ram:
+                decoded = self._decode_ram_snapshot(observation.ram)
+                payload["overworld"] = self._merge_overworld(decoded, visual)
+            return payload
+        if isinstance(observation, Mapping):
+            return observation
+        raise TypeError(f"Unsupported observation type: {type(observation)!r}")
 
+    def _decode_visual(self, observation: OverworldObservation) -> Dict[str, object]:
+        metadata = observation.metadata or {}
+        analysis = self._analyse_frame(observation)
+        raw_state = analysis.get("frame_state")
+        map_id = "unknown"
+        map_name = f"Map_{map_id}"
+        player_tile = [0, 0]
+        facing = "south"
+        menus = analysis.get("menus", [])
+        tiles: List[Dict[str, object]] = []
+        npcs: List[Dict[str, object]] = []
+        warps: List[Dict[str, object]] = []
+        entities: List[Dict[str, object]] = []
+        overworld = {
+            "map": {"id": map_id, "name": map_name},
+            "player": {"map_id": map_id, "tile": list(player_tile), "facing": facing},
+            "tiles": self._coerce_list_of_mappings(tiles),
+            "warps": self._coerce_list_of_mappings(warps),
+            "npcs": self._coerce_list_of_mappings(npcs),
+            "menus": menus,
+            "entities": self._coerce_list_of_mappings(entities),
+            "frame": {
+                "hash": observation.frame_hash(),
+                "shape": tuple(int(dim) for dim in observation.framebuffer.shape[:2]),
+                "state": raw_state,
+            },
+        }
+        if analysis.get("dialog") is not None:
+            overworld["dialog"] = analysis["dialog"]
+        if analysis.get("highlights"):
+            overworld["highlights"] = analysis["highlights"]
+        return overworld
+
+    @staticmethod
+    def _coerce_overworld_mapping(hint: Mapping[str, object]) -> Dict[str, object]:
+        return {
+            key: (dict(value) if isinstance(value, Mapping) else value)
+            if not isinstance(value, list)
+            else [dict(item) if isinstance(item, Mapping) else item for item in value]
+            for key, value in dict(hint).items()
+        }
+
+    @staticmethod
+    def _coerce_list_of_mappings(items: object) -> List[Dict[str, object]]:
+        result: List[Dict[str, object]] = []
+        if not isinstance(items, Iterable):
+            return result
+        for item in items:
+            if isinstance(item, Mapping):
+                result.append(dict(item))
+        return result
+
+    def extract(self, observation: Union[OverworldObservation, Mapping[str, object]]) -> List[WriteOp]:
+        payload = self._normalise_observation(observation)
+        if not isinstance(payload, Mapping):
+            return []
+        data = payload.get("overworld")
         if not isinstance(data, Mapping):
             return []
+
+        # Legacy payloads may still rely on explicit RAM decode.
+        if not isinstance(observation, OverworldObservation):
+            ram_snapshot = payload.get("ram")
+            if ram_snapshot is not None:
+                decoded = self._decode_ram_snapshot(ram_snapshot)
+                data = self._merge_overworld(decoded, data)
 
         writes: List[WriteOp] = []
         tile_records: Dict[Tuple[str, int, int], OverworldTile] = {}
@@ -328,7 +409,85 @@ class OverworldExtractor:
                 )
                 writes.append(WriteOp(kind="node", payload=menu_node))
 
+        self._last_payload = payload
         return writes
+
+    def _analyse_frame(self, observation: OverworldObservation) -> Dict[str, object]:
+        framebuffer = observation.framebuffer.astype(np.float32)
+        gray = framebuffer.mean(axis=2)
+        h, w = gray.shape
+        bottom = gray[int(h * 0.75) :, :]
+        mid = gray[int(h * 0.45) : int(h * 0.7), :]
+        left = gray[:, : int(w * 0.1)]
+        right = gray[:, -int(w * 0.1) :]
+
+        dialog_brightness = bottom.mean()
+        dialog_variance = bottom.std()
+        hud_brightness = np.concatenate([left, right], axis=1).mean()
+
+        dialog_open = dialog_brightness < 60 and dialog_variance < 50
+        menu_overlay = hud_brightness < 120 or mid.std() > 40
+
+        raw_hash = observation.metadata.get("raw_frame_hash") or observation.frame_hash()
+        menus: List[Dict[str, object]] = []
+
+        if dialog_open:
+            menus.append(
+                {
+                    "id": f"dialog:{raw_hash}",
+                    "path": ["DIALOG"],
+                    "open": True,
+                    "state": raw_hash,
+                }
+            )
+            dialog = {
+                "id": f"dialog:{raw_hash}",
+                "state": raw_hash,
+                "hash": raw_hash,
+            }
+        elif menu_overlay:
+            menus.append(
+                {
+                    "id": f"overlay:{raw_hash}",
+                    "path": ["OVERLAY"],
+                    "open": True,
+                    "state": raw_hash,
+                }
+            )
+            dialog = None
+        else:
+            menus.append(
+                {
+                    "id": f"screen:{raw_hash}",
+                    "path": ["SCREEN"],
+                    "open": False,
+                    "state": raw_hash,
+                }
+            )
+            dialog = None
+
+        highlights: List[Dict[str, object]] = []
+        if dialog_open:
+            column_energy = bottom.mean(axis=0)
+            cursor_col = int(np.argmax(column_energy))
+            highlights.append(
+                {
+                    "kind": "dialog_cursor",
+                    "column": cursor_col,
+                    "state": raw_hash,
+                }
+            )
+
+        return {
+            "frame_state": raw_hash,
+            "menus": menus,
+            "dialog": dialog,
+            "highlights": highlights or None,
+        }
+
+    @property
+    def last_payload(self) -> Optional[Mapping[str, object]]:
+        return self._last_payload
 
     @staticmethod
     def _emit_adjacent_edges(

@@ -61,8 +61,8 @@ SR-FBAM already runs reliably inside battle simulations, but overworld execution
 
 - ✅ Run metadata snapshots: `scripts/run_overworld_controller.py --metadata-out` now records seeds, planner config, and environment details next to telemetry logs.
 - ✅ Watchdogs replan via the LLM or reload save-state on stalls; operators should monitor planner failures.
-- ⏳ Document menu plan expectations in the runbook so on-call operators know to request MENU_SEQUENCE planlets when menus are open.
-- Document failure modes and recovery steps in a runbook.
+- ✅ Menu plan workflow captured in docs/OVERWORLD_RUNBOOK.md; operators rely on MENU_SEQUENCE planlets while menus are open.
+- ✅ Failure modes and recovery steps captured in docs/OVERWORLD_RUNBOOK.md.
 - DoD: Overnight runs complete with minimal manual intervention; operators can recover from crashes using the runbook.
 
 ### Milestone 5 — Optional Training Follow-ups

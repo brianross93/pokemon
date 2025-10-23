@@ -132,7 +132,7 @@ def make_plan_context(run_id: str) -> Mapping[str, object]:
     return {
         "id": f"plan-run-{run_id}",
         "planlet_id": f"pl-overworld-{run_id}",
-        "planlet_kind": "OVERWORLD",
+        "planlet_kind": "MENU_SEQUENCE",
         "timeout": 900,
     }
 

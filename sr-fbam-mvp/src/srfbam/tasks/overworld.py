@@ -1,4 +1,4 @@
-﻿"""
+"""
 Planlet-driven overworld executor that coordinates skills and memory updates.
 """
 
@@ -18,6 +18,7 @@ from src.srfbam.core import EncodedFrame, SRFBAMCore, SrfbamStepSummary
 from src.plan.compiler import CompiledPlan, CompiledPlanlet, PlanCompilationError, PlanCompiler
 from src.plan.planner_llm import PlanBundle, validate_plan_bundle
 from src.overworld import OverworldExtractor, OverworldMemory
+from src.overworld.env.overworld_adapter import OverworldObservation
 from src.overworld.memory.hybrid_adapter import HybridMemoryAdapter
 from src.overworld.memory.slot_bank import SlotBank
 from src.overworld.action_space import OverworldActionSpace
@@ -39,51 +40,12 @@ from src.overworld.skills import (
     UseItemSkill,
     WaitSkill,
 )
+from src.pkmn.frame_encoder import encode_observation
 from .events import PlanletEvent
 from .plan_monitor import PlanMonitor
 
 
 SkillFactory = Type[BaseSkill]
-
-
-def _build_encoded_frame(observation: Mapping[str, object]) -> EncodedFrame:
-    data = observation.get("overworld") if isinstance(observation, Mapping) else None
-    if not isinstance(data, Mapping):
-        data = observation
-    if not isinstance(data, Mapping):
-        data = {}
-
-    map_info = data.get("map") or {}
-    player = data.get("player") or {}
-    menus = data.get("menus") or []
-
-    map_id = str(map_info.get("id", "unknown"))
-    map_hash = (hash(map_id) % 256) / 255.0
-    tile = player.get("tile") or [0, 0]
-    player_x = int(tile[0]) & 0xFF
-    player_y = int(tile[1]) & 0xFF
-    max_coord = 255.0
-    facing = player.get("facing", 0)
-    menu_open = any(bool(getattr(menu, "get", lambda key, default=None: menu[key] if key in menu else default)("open", False)) for menu in menus)
-    npc_count = len(data.get("npcs", []))
-    warp_count = len(data.get("warps", []))
-
-    features = torch.tensor(
-        [
-            map_hash,
-            player_x / max_coord,
-            player_y / max_coord,
-            float(menu_open),
-            float(npc_count % 32) / 32.0,
-            float(warp_count % 32) / 32.0,
-            float(bool(player.get("in_battle"))),
-            (hash(facing) % 256) / 255.0,
-        ],
-        dtype=torch.float32,
-    ).unsqueeze(0)
-    grid = torch.zeros((40, 120), dtype=torch.long)
-    context_key = f"overworld:map:{map_id}"
-    return EncodedFrame(grid=grid, features=features, context_key=context_key, extra={})
 
 
 @dataclass
@@ -128,7 +90,7 @@ class OverworldExecutor:
         memory: Optional[OverworldMemory] = None,
         extractor: Optional[OverworldExtractor] = None,
         core: Optional[SRFBAMCore] = None,
-        frame_encoder: Optional[Callable[[Mapping[str, object]], EncodedFrame]] = None,
+        frame_encoder: Optional[Callable[[OverworldObservation], EncodedFrame]] = None,
         skill_registry: Optional[Mapping[str, SkillFactory]] = None,
     ) -> None:
         self.memory = memory or OverworldMemory()
@@ -142,7 +104,7 @@ class OverworldExecutor:
         self.slot_bank = SlotBank(device=self.core.device)
         self.hybrid_adapter = HybridMemoryAdapter()
         self.device = self.core.device
-        self.frame_encoder = frame_encoder or _build_encoded_frame
+        self.frame_encoder = frame_encoder or encode_observation
         self._last_summary: Optional[SrfbamStepSummary] = None
         self._last_gate_mode: Optional[str] = None
         self._last_gate_view: Optional[str] = None
@@ -163,7 +125,7 @@ class OverworldExecutor:
         self._trace_recorder: Optional[OverworldTraceRecorder] = None
         self._battle_handler: Optional[Callable[[EncounterRequest], EncounterResult]] = None
         self._encounter_bridge = EncounterBridge()
-        self._last_observation: Optional[Mapping[str, object]] = None
+        self._last_observation: Optional[OverworldObservation] = None
         self._plan_metadata: Dict[str, object] = {}
 
     # ------------------------------------------------------------------ #
@@ -261,11 +223,14 @@ class OverworldExecutor:
     # Execution loop
     # ------------------------------------------------------------------ #
 
-    def step(self, observation: Mapping[str, object]) -> ExecutorStepResult:
+    def step(self, observation: OverworldObservation) -> ExecutorStepResult:
         self._last_observation = observation
         writes = self.extractor.extract(observation)
         for op in writes:
             self.memory.write(op)
+        snapshot = self.extractor.last_payload or {}
+        overworld_view = snapshot.get("overworld") if isinstance(snapshot, Mapping) else {}
+        frame_hash = str(observation.metadata.get("frame_hash") or "")
 
         if self.state.current_planlet is None:
             self._advance_planlet()
@@ -297,6 +262,8 @@ class OverworldExecutor:
             overworld_data = telemetry["overworld"]
             overworld_data["action_index"] = 0
             overworld_data["frame_features"] = []
+            overworld_data["frame_hash"] = frame_hash
+            overworld_data["frame_metadata"] = self._convert_for_json(observation.metadata)
             overworld_data["memory"] = self.memory.summarise_nodes()
             overworld_data["view_usage"] = dict(self._view_counts)
             overworld_data["hybrid"] = {"projected": 0, "ingested": 0}
@@ -352,13 +319,13 @@ class OverworldExecutor:
                 # Backwards compatibility for skills without keyword signatures.
                 skill.update_context(summary)  # type: ignore[misc]
 
-        legal_actions = tuple(skill.legal_actions(observation, self.memory))
+        legal_actions = tuple(skill.legal_actions(overworld_view, self.memory))
         if not legal_actions:
             legal_actions = ({"kind": "wait"},)
         mask = self.action_space.build_mask(legal_actions)
         mask_values = [None if not math.isfinite(value) else float(value) for value in mask]
 
-        action = skill.select_action(observation, self.memory)
+        action = skill.select_action(overworld_view, self.memory)
         try:
             action_index = self.action_space.to_index(action)
         except KeyError:
@@ -371,7 +338,7 @@ class OverworldExecutor:
         reason = progress.reason if progress.status is SkillStatus.STALLED else None
         encounter_events: List[Dict[str, object]] = []
         if progress.status is SkillStatus.STALLED and reason == "RANDOM_BATTLE":
-            progress, encounter_events = self._handle_encounter(planlet, observation)
+            progress, encounter_events = self._handle_encounter(planlet, snapshot)
             reason = progress.reason if progress.status is SkillStatus.STALLED else None
 
         gate_info: Dict[str, object] = {
@@ -400,11 +367,13 @@ class OverworldExecutor:
         core["legal_actions"] = [dict(a) for a in legal_actions]
         core["action_mask"] = mask_values
         overworld_data["frame_features"] = list(frame_features)
+        overworld_data["frame_hash"] = frame_hash
+        overworld_data["frame_metadata"] = self._convert_for_json(observation.metadata)
         overworld_data["action_index"] = int(action_index)
         overworld_data["memory"] = self.memory.summarise_nodes()
         overworld_data["view_usage"] = dict(self._view_counts)
         overworld_data["hybrid"] = dict(hybrid_stats)
-        menu_snapshot = self._extract_menu_snapshot(observation)
+        menu_snapshot = self._extract_menu_snapshot(snapshot)
         if menu_snapshot is not None:
             overworld_data["menu_state"] = int(menu_snapshot.get("state", 0))
             if "cursor" in menu_snapshot:
@@ -488,7 +457,21 @@ class OverworldExecutor:
         if recovery_hint:
             overworld_data.setdefault("recovery", recovery_hint)
 
-        observation_payload = self._convert_for_json(observation)
+        base_snapshot: Mapping[str, object] = snapshot if isinstance(snapshot, Mapping) else {}
+        observation_payload = self._convert_for_json(base_snapshot)
+        if isinstance(observation.metadata, Mapping):
+            metadata_payload = self._convert_for_json(observation.metadata)
+            if isinstance(observation_payload, Mapping):
+                observation_payload = dict(observation_payload)
+                frame_entry = observation_payload.get("frame")
+                if isinstance(frame_entry, Mapping):
+                    frame_entry = dict(frame_entry)
+                    frame_entry.setdefault("metadata", metadata_payload)
+                    observation_payload["frame"] = frame_entry
+                else:
+                    observation_payload["frame_metadata"] = metadata_payload
+            else:
+                observation_payload = {"frame_metadata": metadata_payload}
         telemetry_payload = self._convert_for_json(telemetry)
         self._record_trace(
             planlet_id=planlet_id,
@@ -585,8 +568,8 @@ class OverworldExecutor:
                 return dict(meta)
         return {}
 
-    def _extract_menu_snapshot(self, observation: Mapping[str, object]) -> Optional[Dict[str, object]]:
-        overworld = observation.get("overworld") if isinstance(observation, Mapping) else None
+    def _extract_menu_snapshot(self, snapshot: Mapping[str, object]) -> Optional[Dict[str, object]]:
+        overworld = snapshot.get("overworld") if isinstance(snapshot, Mapping) else None
         if not isinstance(overworld, Mapping):
             return None
         extras = overworld.get("extra")
@@ -601,6 +584,17 @@ class OverworldExecutor:
                 cursor = self._coerce_int(extras.get("menu_cursor"))
             if joy_ignore is None:
                 joy_ignore = self._coerce_int(extras.get("joy_ignore"))
+        meta = {}
+        if self._last_observation is not None:
+            meta = self._last_observation.metadata or {}
+            if state is None:
+                state = self._coerce_int(meta.get("menu_state"))
+            if cursor is None:
+                cursor = self._coerce_int(meta.get("menu_cursor"))
+            if joy_ignore is None:
+                joy_ignore = self._coerce_int(meta.get("joy_ignore"))
+            if (not menus) and isinstance(meta.get("menu_snapshot"), Mapping):
+                menus = [dict(meta["menu_snapshot"])]
         has_menu_struct = isinstance(menus, (list, tuple)) and len(menus) > 0
         if state is None and cursor is None and not has_menu_struct:
             return None

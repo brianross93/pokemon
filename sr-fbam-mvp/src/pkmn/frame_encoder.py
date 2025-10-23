@@ -1,72 +1,77 @@
 """
-Frame encoding utilities for projecting PyBoy telemetry into SR-FBAM inputs.
+Frame encoding utilities for projecting PyBoy framebuffer observations into SR-FBAM inputs.
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Mapping
 
+import numpy as np
 import torch
 from torch import Tensor
 
-from src.data.frame_dataset import frame_text_to_tensor
-from src.middleware.pokemon_adapter import PokemonTelemetry
-from srfbam.core import EncodedFrame
+from src.overworld.env.overworld_adapter import OverworldObservation
+from src.srfbam.core import EncodedFrame
 
 GRID_HEIGHT = 40
 GRID_WIDTH = 120
 
 
-def build_ascii_grid(telemetry: PokemonTelemetry) -> str:
-    lines = []
-    lines.append(f"Area: {telemetry.area_id:03d} Pos: ({telemetry.x:03d},{telemetry.y:03d})")
-    lines.append(
-        "InGrass: {ig}  InBattle: {ib}  JoyIgnore: {ji}".format(
-            ig=int(telemetry.in_grass),
-            ib=int(telemetry.in_battle),
-            ji=int(telemetry.extra.get('joy_ignore', 0)),
+def _ensure_frame_dimensions(framebuffer: np.ndarray) -> np.ndarray:
+    if framebuffer.shape[0] != GRID_HEIGHT or framebuffer.shape[1] != GRID_WIDTH:
+        raise ValueError(
+            f"Expected framebuffer shape ({GRID_HEIGHT}, {GRID_WIDTH}, 3); got {framebuffer.shape!r}"
         )
+    if framebuffer.ndim != 3 or framebuffer.shape[2] != 3:
+        raise ValueError("Framebuffer must be an RGB array with shape (H, W, 3).")
+    return framebuffer
+
+
+def build_intensity_grid(framebuffer: np.ndarray) -> Tensor:
+    """Convert RGB framebuffer into a 40x120 intensity grid."""
+    frame = _ensure_frame_dimensions(framebuffer)
+    grayscale = np.dot(frame[..., :3].astype(np.float32), np.array([0.2989, 0.5870, 0.1140], dtype=np.float32))
+    normalized = grayscale / 255.0
+    tensor = torch.from_numpy(normalized).to(torch.float32)
+    grid = (tensor * 255.0).round().clamp(0, 255).to(torch.long)
+    return grid
+
+
+def build_numeric_features(framebuffer: np.ndarray, metadata: Mapping[str, object]) -> Tensor:
+    """Compute lightweight numeric features from the framebuffer and metadata."""
+    frame = _ensure_frame_dimensions(framebuffer)
+    flat = frame.reshape(-1, 3).astype(np.float32) / 255.0
+    mean_rgb = flat.mean(axis=0)
+    std_rgb = flat.std(axis=0)
+    map_id = str(metadata.get("map_id", "unknown"))
+    menu_flag = 1.0 if metadata.get("is_menu") or metadata.get("menu_open") else 0.0
+    cursor_norm = float(metadata.get("menu_cursor", 0)) / 8.0
+    map_token = (hash(map_id) % 1024) / 1023.0
+    feature_vector = np.array(
+        [
+            mean_rgb[0],
+            mean_rgb[1],
+            mean_rgb[2],
+            std_rgb[0],
+            std_rgb[1],
+            std_rgb[2],
+            map_token,
+            np.clip(menu_flag + cursor_norm, 0.0, 1.0),
+        ],
+        dtype=np.float32,
     )
-    lines.append(
-        "MenuState: {ms}  MenuCursor: {mc}".format(
-            ms=int(telemetry.extra.get('menu_state', 0)),
-            mc=int(telemetry.extra.get('menu_cursor', 0)),
-        )
-    )
-    lines.append(f"Species: {telemetry.encounter_species_id or -1}")
-    lines.append(f"StepCounter: {telemetry.step_counter}  ElapsedMS: {int(telemetry.elapsed_ms)}")
-    lines.append("")
-    body = "\n".join(lines)
-    body = body[: GRID_HEIGHT * (GRID_WIDTH + 1)]
-    return body
+    return torch.from_numpy(feature_vector).unsqueeze(0)
 
 
-
-def build_numeric_features(telemetry: PokemonTelemetry) -> Tensor:
-    x_norm = telemetry.x / 256.0
-    y_norm = telemetry.y / 256.0
-    area_norm = telemetry.area_id / 512.0
-    in_grass = float(telemetry.in_grass)
-    in_battle = float(telemetry.in_battle)
-    joy_ignore = float(telemetry.extra.get("joy_ignore", 0))
-    menu_state = float(telemetry.extra.get("menu_state", 0) / 256.0)
-    menu_cursor = float(telemetry.extra.get("menu_cursor", 0) / 256.0)
-    features = torch.tensor([[x_norm, y_norm, area_norm, in_grass, in_battle, joy_ignore, menu_state, menu_cursor]], dtype=torch.float32)
-    return features
-
-
-def encode_frame(telemetry: PokemonTelemetry) -> EncodedFrame:
-    ascii_text = build_ascii_grid(telemetry)
-    grid = frame_text_to_tensor(ascii_text, grid_height=GRID_HEIGHT, grid_width=GRID_WIDTH).to(torch.long)
-    features = build_numeric_features(telemetry)
-    mode = "battle" if telemetry.in_battle else "overworld"
-    context_key = f"area:{telemetry.area_id}:mode:{mode}"
-    return EncodedFrame(
-        grid=grid,
-        features=features,
-        context_key=context_key,
-        extra={
-            "joy_ignore": int(telemetry.extra.get("joy_ignore", 0)),
-            "menu_state": int(telemetry.extra.get("menu_state", 0)),
-            "menu_cursor": int(telemetry.extra.get("menu_cursor", 0)),
-        },
-    )
+def encode_observation(observation: OverworldObservation) -> EncodedFrame:
+    """Project an overworld observation into SR-FBAM's EncodedFrame structure."""
+    framebuffer = observation.framebuffer
+    metadata = observation.metadata or {}
+    grid = build_intensity_grid(framebuffer)
+    features = build_numeric_features(framebuffer, metadata)
+    map_id = str(metadata.get("map_id", "unknown"))
+    context_key = metadata.get("context_key") or f"overworld:map:{map_id}"
+    extra = {
+        "frame_hash": metadata.get("frame_hash"),
+        "timestamp_ms": metadata.get("timestamp_ms"),
+    }
+    return EncodedFrame(grid=grid, features=features, context_key=context_key, extra=extra)

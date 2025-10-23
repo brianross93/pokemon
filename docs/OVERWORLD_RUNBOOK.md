@@ -58,6 +58,7 @@ If the planner fails or is misconfigured, the controller exits and logs the reas
 
 2. **Planner expectations**  
    - When `is_menu` is true, the planner **must** emit a `MENU_SEQUENCE` planlet with a `buttons` array (e.g., `["START", "A", "A"]`).  
+   - The controller also accepts a minimal JSON payload `{ "buttons": [...] }` and wraps it into a canonical `MENU_SEQUENCE` planlet automatically.  
    - Example template: `docs/examples/menu_boot_sequence.json`.
 
 3. **Execution**  

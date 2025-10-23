@@ -14,6 +14,8 @@ def test_fake_overworld_llm_generates_planlet():
     proposer = PlanletProposer()
     proposal = proposer.generate_planlet(summary, llm, allow_search=False)
 
-    assert proposal.planlet["kind"] == "OVERWORLD"
+    assert proposal.planlet["kind"] == "MENU_SEQUENCE"
+    assert proposal.planlet["planlet_id"].startswith("fake_overworld_plan")
+    assert proposal.planlet["args"]["buttons"]
     assert proposal.planlet["script"]
     assert proposal.search_calls == 0

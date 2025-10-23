@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import numpy as np
 
 from src.plan import PlanCompiler
 from src.plan.planner_llm import PlanBundle, PlanletSpec, validate_plan_bundle
 from src.srfbam.tasks.overworld import OverworldExecutor
 from src.overworld.encounter import EncounterResult, OverworldSnapshot
+from src.overworld.env.overworld_adapter import OverworldObservation
 from src.overworld.skills.base import BaseSkill, SkillProgress, SkillStatus
 
 DIRECTION_DELTAS = {
@@ -14,6 +16,24 @@ DIRECTION_DELTAS = {
     "LEFT": (-1, 0),
     "RIGHT": (1, 0),
 }
+
+
+def make_observation(
+    overworld_payload: dict[str, object],
+    *,
+    metadata: dict[str, object] | None = None,
+) -> OverworldObservation:
+    frame = np.zeros((40, 120, 3), dtype=np.uint8)
+    meta = {
+        "visual_overworld": copy.deepcopy(overworld_payload),
+        "map_id": str(overworld_payload.get("map", {}).get("id", "unknown")),
+        "map_name": overworld_payload.get("map", {}).get("name"),
+        "player_tile": list(overworld_payload.get("player", {}).get("tile", [0, 0])),
+        "player_facing": overworld_payload.get("player", {}).get("facing", "south"),
+    }
+    if metadata:
+        meta.update(metadata)
+    return OverworldObservation(framebuffer=frame, ram=None, metadata=meta)
 
 
 class RandomBattleSkill(BaseSkill):
@@ -35,18 +55,23 @@ class RandomBattleSkill(BaseSkill):
 
 def run_executor_sequence(
     executor: OverworldExecutor,
-    base_obs: dict,
+    base_overworld: dict[str, object],
     start_tile: list[int],
     *,
     warp_destination: list[int] | None = None,
     max_steps: int = 10,
-):
+) -> list:
     current_tile = list(start_tile)
     results = []
+    base_payload = (
+        copy.deepcopy(base_overworld["overworld"]) if isinstance(base_overworld, dict) and "overworld" in base_overworld else copy.deepcopy(base_overworld)
+    )
     for _ in range(max_steps):
-        obs = copy.deepcopy(base_obs)
-        obs["overworld"]["player"]["tile"] = current_tile.copy()
-        result = executor.step(obs)
+        payload = copy.deepcopy(base_payload)
+        player = payload.setdefault("player", {})
+        player["tile"] = current_tile.copy()
+        observation = make_observation(payload)
+        result = executor.step(observation)
         results.append(result)
         if result.status in {"PLANLET_COMPLETE", "PLAN_COMPLETE", "PLANLET_STALLED"}:
             break
@@ -247,7 +272,7 @@ def test_encounter_bridge_handles_clean_exit() -> None:
         }
     }
 
-    result = executor.step(copy.deepcopy(base_obs))
+    result = executor.step(make_observation(copy.deepcopy(base_obs["overworld"])))
     encounter_events = result.telemetry.get("encounter", [])
     phases = [event.get("phase") for event in encounter_events]
     assert phases == ["battle.entry", "battle.exit"]
@@ -305,7 +330,7 @@ def test_encounter_bridge_detects_invariant_violation() -> None:
         }
     }
 
-    result = executor.step(copy.deepcopy(base_obs))
+    result = executor.step(make_observation(copy.deepcopy(base_obs["overworld"])))
     encounter_events = result.telemetry.get("encounter", [])
     phases = [event.get("phase") for event in encounter_events]
     assert phases == ["battle.entry", "battle.exit"]
@@ -313,3 +338,7 @@ def test_encounter_bridge_detects_invariant_violation() -> None:
     exit_event = [event for event in encounter_events if event.get("phase") == "battle.exit"][0]
     assert exit_event["result"]["status"] == "ESCAPED"
     assert exit_event["overworld_invariants"]["menu_closed"] is False
+
+
+
+
