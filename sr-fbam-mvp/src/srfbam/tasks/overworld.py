@@ -395,7 +395,9 @@ class OverworldExecutor:
         core["speedup"] = dict(self._metrics["speedup"])
         core["fallback_required"] = bool(core.get("fallback_required", False))
         if encounter_events:
-            overworld_data["encounter"] = [self._convert_for_json(event) for event in encounter_events]
+            serialised_events = [self._convert_for_json(event) for event in encounter_events]
+            overworld_data["encounter"] = serialised_events
+            telemetry["encounter"] = serialised_events
 
         recovery_reason = self.monitor.record_step(planlet.spec.id, skill, self.memory)
         if recovery_reason == "BLOCKED_PATH" and isinstance(skill, NavigateSkill):

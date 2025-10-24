@@ -68,9 +68,11 @@ class PlannerPromptBuilder:
         lines.append(f"Goal: {goal_text}")
         lines.append("")
         lines.append(
-            "Supported planlet kinds: NAVIGATE_TO, MENU_SEQUENCE (buttons array), OPEN_MENU, USE_ITEM, HANDLE_ENCOUNTER."
+            "Supported planlet kinds: NAVIGATE_TO, INTERACT, MENU_SEQUENCE (buttons array), OPEN_MENU, USE_ITEM, HANDLE_ENCOUNTER."
         )
-        lines.append("When menus are open, emit MENU_SEQUENCE planlets with explicit buttons (e.g., START, A, A).")
+        lines.append(
+            "When menus are closed, prefer NAVIGATE_TO with args.target.tile=[x,y] to reach a tile, or INTERACT with args.entity_id referencing a sprite/NPC. When menus are open, emit MENU_SEQUENCE planlets with explicit buttons (e.g., START, A, A)."
+        )
         lines.append("")
 
         lines.append("Entity Summary:")

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
@@ -296,7 +296,7 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
     def _build_metadata(self, framebuffer: np.ndarray, raw_frame: Optional[np.ndarray]) -> Dict[str, Any]:
         frame_index = int(self.pyboy.frame_count)
         timestamp_ms = frame_index * (1000.0 / 60.0)
-        metadata = {
+        metadata: Dict[str, Any] = {
             "frame_index": frame_index,
             "timestamp_ms": timestamp_ms,
             "frame_hash": self._hash_frame(framebuffer),
@@ -306,6 +306,58 @@ class PyBoyPokemonAdapter(PokemonBlueAdapter):
         if raw_frame is not None:
             metadata["raw_frame_shape"] = tuple(int(dim) for dim in raw_frame.shape[:2])
             metadata["raw_frame_hash"] = self._hash_frame(raw_frame)
+
+        screen_payload: Dict[str, Any] = {}
+        try:
+            game_area = self.pyboy.game_area()
+            if isinstance(game_area, np.ndarray):
+                screen_payload["tile_ids"] = game_area.astype(int).tolist()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            collision = self.pyboy.game_area_collision()
+            if isinstance(collision, np.ndarray):
+                screen_payload["collision"] = collision.astype(int).tolist()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        sprites: List[Dict[str, Any]] = []
+        try:
+            for index in range(40):
+                sprite = self.pyboy.get_sprite(index)
+                if sprite is None:
+                    continue
+                sprite_entry = {
+                    "index": int(getattr(sprite, "sprite_index", index)),
+                    "tile_id": int(getattr(sprite, "tile_identifier", 0)),
+                    "x": int(getattr(sprite, "x", 0)),
+                    "y": int(getattr(sprite, "y", 0)),
+                    "on_screen": bool(getattr(sprite, "on_screen", True)),
+                    "attributes": {
+                        "palette": int(getattr(sprite, "attr_palette_number", 0)),
+                        "priority": bool(getattr(sprite, "attr_obj_bg_priority", False)),
+                        "x_flip": bool(getattr(sprite, "attr_x_flip", False)),
+                        "y_flip": bool(getattr(sprite, "attr_y_flip", False)),
+                    },
+                }
+                sprites.append(sprite_entry)
+        except Exception:  # pragma: no cover - defensive
+            sprites = []
+        if sprites:
+            screen_payload["sprites"] = sprites
+
+        if screen_payload:
+            metadata["screen"] = screen_payload
+
+        try:
+            memory = self.pyboy.memory
+            metadata["scroll"] = {
+                "scx": int(memory[0xFF43]) & 0xFF,
+                "scy": int(memory[0xFF42]) & 0xFF,
+            }
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         return metadata
 
     @staticmethod

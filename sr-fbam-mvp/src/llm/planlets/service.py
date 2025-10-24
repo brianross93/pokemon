@@ -144,6 +144,23 @@ class PlanletService:
         else:
             self.cache.record_feedback_by_planlet(planlet_id, success, weight=weight)
 
+    def invalidate_cached_planlet(
+        self,
+        *,
+        planlet_id: Optional[str] = None,
+        cache_key: Optional[str] = None,
+    ) -> None:
+        if self.cache is None:
+            return
+        if cache_key:
+            self.cache.invalidate(key=cache_key)
+            for pid, mapped_key in list(self._plan_cache_index.items()):
+                if mapped_key == cache_key:
+                    self._plan_cache_index.pop(pid, None)
+        elif planlet_id:
+            self.cache.invalidate(planlet_id=planlet_id)
+            self._plan_cache_index.pop(str(planlet_id), None)
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #

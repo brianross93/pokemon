@@ -239,6 +239,15 @@ class PlanCache:
             return
         self.record_feedback(key, success, weight=weight)
 
+    def invalidate(self, *, key: Optional[str] = None, planlet_id: Optional[str] = None) -> None:
+        if key is not None:
+            self._remove(key)
+            return
+        if planlet_id is not None:
+            cache_key = self._planlet_index.get(planlet_id)
+            if cache_key is not None:
+                self._remove(cache_key)
+
     def prune(self) -> None:
         """Eagerly remove expired entries."""
 

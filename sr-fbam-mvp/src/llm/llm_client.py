@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 class LLMConfig:
     """Configuration for LLM client."""
 
-    model: str = "gpt-5"
+    model: str = "gpt-5-mini"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     verbosity: str = "medium"

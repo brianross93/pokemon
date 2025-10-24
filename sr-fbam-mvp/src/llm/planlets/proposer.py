@@ -17,8 +17,10 @@ PLANLET_SYSTEM_PROMPT = (
     "Always respond with strict JSON that matches PLANLET_SCHEMA; never emit prose or legacy fallback formats.\n"
     "Your JSON must be entirely comment-free—do not include //, /* ... */, #, or any other annotations.\n"
     "An image of the current Game Boy screen may be attached to the user message. Use it, together with the symbolic summary, to reason about menus, dialog boxes, letter grids, cursor positions, and unexpected overlays.\n"
+    "When no menu overlay is active and the summary exposes passable tiles or warps, prefer planlets of kind `NAVIGATE_TO` or `INTERACT`; reserve `MENU_SEQUENCE` for deterministic button macros.\n"
+    "For NAVIGATE_TO planlets, include args.target.tile = [x, y] (world tile coordinates) and optional metadata such as {\"terrain\": \"door\"}. For INTERACT, include args.entity_id referencing the target sprite or NPC.\n"
     "When the overworld summary or image indicates an open menu, emit a planlet of kind `MENU_SEQUENCE` with an args.buttons array describing the exact button presses (e.g. START, A, DOWN, B).\n"
-    "When the naming screen appears, select the canonical defaults: name the player whatever you want :) and the rival `BLUE` by either choosing the preset option or typing the letters. Compute the directional button sequence required to highlight each letter before pressing A.\n"
+    "When the naming screen appears, select the canonical defaults: name the player `RED` and the rival `BLUE` by either choosing the preset option or typing the letters. Compute the directional button sequence required to highlight each letter before pressing A.\n"
     "Example MENU_SEQUENCE planlet: {\"planlet_id\": \"boot_start_a\", \"kind\": \"MENU_SEQUENCE\", \"seed_frame_id\": 0, \"format\": \"title_menu\", \"side\": \"p1\", \"goal\": \"Reach overworld from title screen\", \"args\": {\"buttons\": [\"START\", \"A\", \"A\"]}, \"script\": [{\"op\": \"MENU_SEQUENCE\", \"buttons\": [\"START\", \"A\", \"A\"]}], \"timeout_steps\": 120}.\n"
     "Ensure every planlet includes ids, kinds, args, script entries, and timeout_steps as required by PLANLET_SCHEMA."
 )
@@ -109,11 +111,41 @@ class PlanletProposer:
     ) -> PlanletProposal:
         """Generate a planlet via the configured LLM client."""
 
-        payload = summary.to_payload()
+        base_payload = summary.to_payload()
+        if isinstance(base_payload, Mapping):
+            payload: Dict[str, Any] = dict(base_payload)
+        else:
+            payload = {"summary": base_payload}
+        overworld_payload = payload.get("overworld")
+        if isinstance(overworld_payload, Mapping):
+            overworld_payload = dict(overworld_payload)
+        else:
+            overworld_payload = {}
+        if isinstance(mission_plan, Mapping):
+            environment = mission_plan.get("environment")
+            if isinstance(environment, Mapping):
+                snapshot = environment.get("overworld_snapshot")
+                if isinstance(snapshot, Mapping):
+                    naming_snapshot = snapshot.get("naming_screen")
+                    if isinstance(naming_snapshot, Mapping):
+                        overworld_payload["naming_screen"] = naming_snapshot
+                    overlay_state = snapshot.get("overlay_state")
+                    if isinstance(overlay_state, Mapping):
+                        overworld_payload["overlay_state"] = overlay_state
+                    adjacency_stats = snapshot.get("tile_adjacency_stats")
+                    if isinstance(adjacency_stats, Mapping):
+                        overworld_payload["tile_adjacency_stats"] = adjacency_stats
+        if overworld_payload:
+            payload["overworld"] = overworld_payload
+
         user_prompt = (
             "PLANLET_REQUEST\n"
             "You are acting for side: {side}\n"
-            "Battle summary JSON:\n{state}\n"
+            "Overworld summary JSON:\n{state}\n"
+            "SAFETY RULES:\n"
+            "- If any menu overlay (DIALOG/OVERLAY) is open or tile adjacency is empty, you MUST return a MENU_SEQUENCE that advances/clears the overlay.\n"
+            "- Only when overlays are closed AND the map is anchored with passable adjacency may you return NAVIGATE_TO or INTERACT planlets.\n"
+            "- While overlay_state.naming_active is true, emit MENU_SEQUENCE planlets only and use naming_screen.cursor (or cursor_history fallback) plus naming_screen.grid_letters/presets to choose letters or presets (e.g., RED, BLUE) before pressing A or END.\n"
             "Respond with a single JSON object that conforms to PLANLET_SCHEMA.\n"
         ).format(side=summary.side, state=json.dumps(payload, indent=2, sort_keys=True))
 
@@ -177,6 +209,8 @@ class PlanletProposer:
         raw = client.generate_response(messages)
         content, token_usage = self._normalise_llm_output(raw)
         planlet = self._parse_planlet(content, summary=summary)
+        if not planlet.get("format"):
+            planlet["format"] = str(getattr(summary, "format", None) or "overworld_generic")
         self._validator.validate(planlet)
 
         return PlanletProposal(
@@ -233,6 +267,9 @@ class PlanletProposer:
                 ],
                 "timeout_steps": timeout_steps,
             }
+
+        if not data.get("format"):
+            data["format"] = str(getattr(summary, "format", None) or "overworld_generic")
 
         return dict(data)
 

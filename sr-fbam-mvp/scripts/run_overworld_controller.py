@@ -14,7 +14,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from collections import deque
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 from concurrent.futures import ThreadPoolExecutor, Future
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "fake", "mock", "openai", "anthropic"],
         help="Planner backend to use for planlet generation.",
     )
-    parser.add_argument("--planner-model", type=str, default="gpt-5", help="Override planner model identifier.")
+    parser.add_argument("--planner-model", type=str, default="gpt-5-mini", help="Override planner model identifier.")
     parser.add_argument("--planner-api-key", type=str, help="API key for planner backend (env fallback).")
     parser.add_argument("--planner-base-url", type=str, help="Optional API base URL override.")
     parser.add_argument("--planner-store", type=Path, help="Directory to persist emitted planlets.")
@@ -152,6 +153,32 @@ def ingest_overworld_observation(
         executor.memory.write(op)
     executor._last_observation = observation  # keep executor memo in sync
     snapshot = executor.extractor.last_payload or {}
+    if isinstance(snapshot, Mapping):
+        try:
+            overworld = snapshot.get("overworld", {})
+            if isinstance(overworld, Mapping):
+                tile_count = len(overworld.get("tiles", [])) if isinstance(overworld.get("tiles"), list) else 0
+                adjacency = overworld.get("tile_adjacency")
+                adjacency_edges = 0
+                if isinstance(adjacency, Mapping):
+                    adjacency_edges = sum(len(neigh) for neigh in adjacency.values() if isinstance(neigh, list))
+                map_id = None
+                player_tile = None
+                map_info = overworld.get("map")
+                if isinstance(map_info, Mapping):
+                    map_id = map_info.get("id")
+                player_info = overworld.get("player")
+                if isinstance(player_info, Mapping):
+                    player_tile = player_info.get("tile")
+                LOGGER.debug(
+                    "Overworld graph snapshot: tiles=%s adjacency_edges=%s map=%s player_tile=%s",
+                    tile_count,
+                    adjacency_edges,
+                    map_id,
+                    player_tile,
+                )
+        except Exception:
+            LOGGER.exception("Failed to summarise overworld graph snapshot.")
     return dict(snapshot) if isinstance(snapshot, Mapping) else {}
 
 
@@ -218,6 +245,9 @@ class PlanCoordinator:
         self._last_source = backend_label if service is not None else "planner-unavailable"
         self._mission_plan: Dict[str, Any] = copy.deepcopy(mission_plan or DEFAULT_MISSION_PLAN)
         self._search_notice_logged = False
+        self._recent_dialog: deque[Dict[str, Any]] = deque(maxlen=6)
+        self._dialog_facts: deque[Dict[str, Any]] = deque(maxlen=12)
+        self._dialog_fact_hashes: set[str] = set()
 
     def has_planner(self) -> bool:
         return self.service is not None
@@ -241,6 +271,18 @@ class PlanCoordinator:
             self._search_notice_logged = True
         frame_bytes = self._encode_observation(observation)
         mission_plan_payload = self._mission_plan_for_prompt()
+        if mission_plan_payload:
+            snapshot = mission_plan_payload.get("environment", {}).get("overworld_snapshot")
+            if isinstance(snapshot, Mapping):
+                naming_payload = snapshot.get("naming_screen")
+                overlay_payload = snapshot.get("overlay_state")
+                self._logger.info(
+                    "Mission plan snapshot: naming=%s overlay=%s cursor=%s presets=%s",
+                    bool(naming_payload),
+                    bool(overlay_payload),
+                    naming_payload.get("cursor") if isinstance(naming_payload, Mapping) else None,
+                    naming_payload.get("presets") if isinstance(naming_payload, Mapping) else None,
+                )
         try:
             proposal = self.service.request_overworld_planlet(
                 self.executor.memory,
@@ -400,7 +442,256 @@ class PlanCoordinator:
         planlets_section["active"] = active
         planlets_section.setdefault("pending", [])
         planlets_section.setdefault("completed", [])
+        snapshot = self._overworld_snapshot_for_prompt()
+        extractor_payload = getattr(self.executor, "extractor", None)
+        if extractor_payload is not None:
+            last_payload = getattr(extractor_payload, "last_payload", None)
+            if isinstance(last_payload, Mapping):
+                ow = last_payload.get("overworld")
+                naming_present = isinstance(ow.get("naming_screen"), Mapping) if isinstance(ow, Mapping) else False
+                map_id = ow.get("map", {}).get("id") if isinstance(ow, Mapping) else None
+                menus = ow.get("menus") if isinstance(ow, Mapping) else None
+                self._logger.info(
+                    "Last payload map=%s naming=%s menus=%s",
+                    map_id,
+                    naming_present,
+                    menus[:3] if isinstance(menus, list) else menus,
+                )
+        if snapshot:
+            plan.setdefault("environment", {})["overworld_snapshot"] = snapshot
         return plan
+
+    def _overworld_snapshot_for_prompt(self) -> Optional[Dict[str, Any]]:
+        extractor = getattr(self.executor, "extractor", None)
+        payload = getattr(extractor, "last_payload", None)
+        if not isinstance(payload, Mapping):
+            return None
+        overworld = payload.get("overworld")
+        if not isinstance(overworld, Mapping):
+            return None
+
+        player = overworld.get("player") or {}
+        try:
+            px = int(player.get("tile", [0, 0])[0])
+            py = int(player.get("tile", [0, 0])[1])
+        except Exception:
+            px = 0
+            py = 0
+
+        tiles = overworld.get("tiles")
+        interesting: List[Dict[str, Any]] = []
+        if isinstance(tiles, Iterable):
+            for tile in tiles:
+                if not isinstance(tile, Mapping):
+                    continue
+                passable = bool(tile.get("passable", True))
+                terrain = str(tile.get("terrain", "unknown"))
+                special = tile.get("special")
+                if not passable and terrain not in {"door", "stairs"} and not special:
+                    continue
+                if terrain not in {"door", "stairs"} and not special:
+                    continue
+                try:
+                    tx = int(tile.get("x", 0))
+                    ty = int(tile.get("y", 0))
+                except Exception:
+                    continue
+                dist = abs(px - tx) + abs(py - ty)
+                interesting.append(
+                    {
+                        "tile": [tx, ty],
+                        "terrain": terrain,
+                        "special": special,
+                        "passable": passable,
+                        "screen": dict(tile.get("screen", {})) if isinstance(tile.get("screen"), Mapping) else None,
+                        "distance": dist,
+                    }
+                )
+        interesting.sort(key=lambda item: item["distance"])
+        interesting = interesting[:8]
+
+        entities_payload: List[Dict[str, Any]] = []
+        entities = overworld.get("entities")
+        if isinstance(entities, Iterable):
+            for entity in entities:
+                if not isinstance(entity, Mapping):
+                    continue
+                entry = {
+                    "id": str(entity.get("id")),
+                    "tile": list(entity.get("tile", [])) if isinstance(entity.get("tile"), Iterable) else None,
+                    "tile_id": entity.get("tile_id"),
+                    "screen": dict(entity.get("screen", {})) if isinstance(entity.get("screen"), Mapping) else None,
+                }
+                entities_payload.append(entry)
+        if len(entities_payload) > 8:
+            entities_payload = entities_payload[:8]
+
+        snapshot: Dict[str, Any] = {
+            "player": {
+                "tile": [px, py],
+                "facing": player.get("facing"),
+                "map_id": player.get("map_id"),
+            },
+            "targets": interesting,
+            "entities": entities_payload,
+        }
+
+        dialog_lines = overworld.get("dialog_lines")
+        if isinstance(dialog_lines, list):
+            for line in dialog_lines:
+                if isinstance(line, str):
+                    text = line.strip()
+                    if text:
+                        self._recent_dialog.append({"text": text, "map_id": snapshot["player"]["map_id"]})
+            self._handle_dialog_lines(dialog_lines, map_id=snapshot["player"]["map_id"])
+        if self._recent_dialog:
+            snapshot["recent_dialog"] = list(self._recent_dialog)
+
+        naming = overworld.get("naming_screen")
+        if isinstance(naming, Mapping):
+            naming_snapshot: Dict[str, Any] = {
+                "grid_letters": naming.get("grid_letters"),
+                "cursor": naming.get("cursor"),
+            }
+            if isinstance(naming.get("cursor_history"), list):
+                naming_snapshot["cursor_history"] = naming.get("cursor_history")[:8]
+            if isinstance(naming.get("presets"), list):
+                naming_snapshot["presets"] = naming.get("presets")
+            if isinstance(naming.get("dialog_lines"), list):
+                naming_snapshot["dialog_lines"] = naming.get("dialog_lines")
+            snapshot["naming_screen"] = naming_snapshot
+            self._logger.info(
+                "Snapshot naming cursor=%s presets=%s",
+                naming_snapshot.get("cursor"),
+                naming_snapshot.get("presets"),
+            )
+
+        menus = overworld.get("menus")
+        if isinstance(menus, list):
+            snapshot["menus"] = [
+                {"id": menu.get("id"), "path": menu.get("path"), "open": menu.get("open")}
+                for menu in menus[:5]
+                if isinstance(menu, Mapping)
+            ]
+
+        overlay_state: Dict[str, Any] = {}
+        if isinstance(overworld.get("dialog"), Mapping):
+            overlay_state["dialog_open"] = True
+        if isinstance(menus, list):
+            overlay_state["menu_overlay"] = any(
+                bool(menu.get("open"))
+                and any("OVERLAY" in str(part).upper() for part in (menu.get("path") or []))
+                for menu in menus
+                if isinstance(menu, Mapping)
+            )
+        if isinstance(naming, Mapping):
+            overlay_state["naming_active"] = True
+        if overlay_state:
+            snapshot["overlay_state"] = overlay_state
+
+        adjacency = overworld.get("tile_adjacency")
+        if isinstance(adjacency, Mapping) and adjacency:
+            degrees: List[int] = []
+            sample: List[Dict[str, Any]] = []
+            for key, neighbors in adjacency.items():
+                if not isinstance(neighbors, Iterable):
+                    continue
+                neighbor_list = list(neighbors)
+                deg = len(neighbor_list)
+                degrees.append(deg)
+                if len(sample) < 4 and isinstance(key, tuple) and len(key) == 3:
+                    sample.append(
+                        {
+                            "tile": {"map_id": key[0], "x": key[1], "y": key[2]},
+                            "neighbors": deg,
+                        }
+                    )
+            if degrees:
+                avg_degree = sum(degrees) / len(degrees)
+                adjacency_stats = {
+                    "tracked_tiles": len(degrees),
+                    "avg_degree": round(avg_degree, 2),
+                    "max_degree": max(degrees),
+                    "min_degree": min(degrees),
+                    "isolated_tiles": sum(1 for value in degrees if value == 0),
+                }
+                if sample:
+                    adjacency_stats["sample"] = sample
+                snapshot["tile_adjacency_stats"] = adjacency_stats
+
+        if self._dialog_facts:
+            snapshot["dialog_facts"] = list(self._dialog_facts)
+
+        return snapshot
+
+    def _handle_dialog_lines(self, lines: Iterable[str], *, map_id: Any) -> None:
+        cleaned = tuple(str(line).strip() for line in lines if isinstance(line, str))
+        if not cleaned:
+            return
+        hash_key = json.dumps({"map": map_id, "lines": cleaned}, ensure_ascii=False)
+        if hash_key in self._dialog_fact_hashes:
+            return
+        self._dialog_fact_hashes.add(hash_key)
+        facts = self._summarise_dialog_lines(cleaned, map_id=map_id)
+        for fact in facts:
+            entry = {
+                "map_id": map_id,
+                "fact": fact,
+                "source_lines": list(cleaned),
+            }
+            self._dialog_facts.append(entry)
+
+    def _summarise_dialog_lines(self, lines: Iterable[str], *, map_id: Any) -> List[Dict[str, Any]]:
+        if self.service is None:
+            return []
+        client = getattr(self.service, "client", None)
+        if client is None:
+            return []
+
+        system_prompt = (
+            "You convert Pokémon NPC dialog into structured facts for an agent. "
+            "Always respond with a JSON array (possibly empty) of objects, with fields such as type, action, item, "
+            "location, summary, or actor. Use concise lowercase identifiers (e.g., type:\"clue\", action:\"learn_move\"). "
+            "If no actionable information is present, return an empty array []. Never include comments or prose outside the JSON array."
+        )
+        user_payload = {
+            "map_id": map_id,
+            "dialog_lines": list(lines),
+        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
+        ]
+
+        try:
+            raw = client.generate_response(messages)
+        except Exception as exc:
+            self._logger.exception("Dialog summariser call failed: %s", exc)
+            return []
+
+        if isinstance(raw, str):
+            content = raw.strip()
+        elif isinstance(raw, Mapping):
+            content = json.dumps(raw)
+        else:
+            content = str(raw)
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            self._logger.warning("Dialog summariser returned non-JSON payload: %s", content)
+            return []
+
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return []
+
+        facts: List[Dict[str, Any]] = []
+        for entry in data:
+            if isinstance(entry, Mapping):
+                facts.append({key: value for key, value in entry.items() if isinstance(key, str)})
+        return facts
 
     def register_plan_bundle(self, plan: "CompiledPlan", reason: str) -> None:
         pending = self._mission_plan.setdefault("planlets", {}).setdefault("pending", [])
@@ -581,11 +872,11 @@ def build_planlet_service(
         model = args.planner_model
         if not model:
             if backend == "openai":
-                model = "gpt-5"
+                model = "gpt-5-mini"
             elif backend == "anthropic":
                 model = "claude-3-sonnet-20240229"
             else:
-                model = "gpt-5"
+                model = "gpt-5-mini"
 
         api_key = args.planner_api_key
         if not api_key:
@@ -700,6 +991,57 @@ def main() -> int:
     planner_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="planner")
     pending_plan: Optional[Dict[str, Any]] = None
 
+    # -------------------- Overworld readiness predicates -------------------- #
+    def _overlay_open(snapshot: Mapping[str, object]) -> bool:
+        ow = snapshot.get("overworld") if isinstance(snapshot, Mapping) else None
+        if not isinstance(ow, Mapping):
+            return False
+        menus = ow.get("menus")
+        if not isinstance(menus, Iterable):
+            return False
+        for menu in menus:
+            if not isinstance(menu, Mapping):
+                continue
+            if not menu.get("open"):
+                continue
+            path = menu.get("path") or []
+            if any(str(part).upper() in {"DIALOG", "OVERLAY"} for part in path):
+                return True
+        return False
+
+    def _anchored_world(snapshot: Mapping[str, object]) -> bool:
+        ow = snapshot.get("overworld") if isinstance(snapshot, Mapping) else None
+        if not isinstance(ow, Mapping):
+            return False
+        map_info = ow.get("map")
+        map_id = map_info.get("id") if isinstance(map_info, Mapping) else None
+        tiles = ow.get("tiles")
+        tile_count = len(tiles) if isinstance(tiles, list) else 0
+        if not map_id or map_id == "unknown":
+            return False
+        if map_id == "screen_local":
+            if tile_count < 200:
+                return False
+        else:
+            if tile_count < 120:
+                return False
+        adjacency = ow.get("tile_adjacency")
+        if not isinstance(adjacency, Mapping):
+            return False
+        adjacency_edges = 0
+        for neighbors in adjacency.values():
+            if isinstance(neighbors, Iterable):
+                adjacency_edges += sum(1 for _ in neighbors)
+        min_edges = 200 if map_id == "screen_local" else 50
+        if adjacency_edges < min_edges:
+            return False
+        return True
+
+    def _overworld_ready(snapshot: Mapping[str, object]) -> bool:
+        return _anchored_world(snapshot) and not _overlay_open(snapshot)
+    # ----------------------------------------------------------------------- #
+
+
     def load_plan_bundle(
         bundle: PlanBundle,
         planner_snapshot: Mapping[str, object],
@@ -779,6 +1121,20 @@ def main() -> int:
         if isinstance(started_at, (int, float)):
             elapsed = time.perf_counter() - started_at
             LOGGER.info("Planner completed (reason=%s) in %.2fs", reason, elapsed)
+        primary_kind = None
+        try:
+            planlets = getattr(bundle, "planlets", None)
+            if planlets:
+                primary_kind = getattr(planlets[0], "kind", None)
+        except Exception:
+            primary_kind = None
+        if not _overworld_ready(snapshot_payload) and primary_kind != "MENU_SEQUENCE":
+            LOGGER.info(
+                "Discarding %s planlet while overlay/intro active; requesting MENU_SEQUENCE instead.",
+                primary_kind or "unknown",
+            )
+            load_new_plan("overlay_force_menu", snapshot_payload, observation_obj=last_observation_obj)
+            return None
         if not load_plan_bundle(bundle, snapshot_payload, reason=reason):
             planner_failure_count += 1
             return False
@@ -795,7 +1151,8 @@ def main() -> int:
     ) -> None:
         if executor.state.current_planlet is not None or executor.state.plan_queue:
             return
-        load_new_plan(reason, planner_snapshot, observation_obj=observation_obj)
+        request_reason = reason if _overworld_ready(planner_snapshot) else "overlay_bootstrap"
+        load_new_plan(request_reason, planner_snapshot, observation_obj=observation_obj)
 
     def replan_handler(event) -> Optional[PlanBundle]:
         status = getattr(event, "status", None)
@@ -809,7 +1166,8 @@ def main() -> int:
         tag_components = [str(part) for part in (status, reason) if part]
         tag = ":".join(tag_components) if tag_components else "replan"
         observation_ref = executor._last_observation or last_observation_obj
-        load_new_plan(tag, last_snapshot, observation_obj=observation_ref)
+        gated_tag = tag if _overworld_ready(last_snapshot) else "overlay_replan"
+        load_new_plan(gated_tag, last_snapshot, observation_obj=observation_ref)
         return None
 
     executor.register_replan_handler(replan_handler)
@@ -854,12 +1212,158 @@ def main() -> int:
         return 1
 
     step = 0
+
+    # ------------------------------------------------------------------ #
+    # While waiting on an asynchronous planner response, pump PyBoy with
+    # single-frame waits so SDL stays responsive without progressing state.
+    # ------------------------------------------------------------------ #
+    def _idle_pump_until_plan(*, max_seconds: float = 12.0, frames_per_pump: int = 1) -> None:
+        nonlocal observation, last_snapshot, last_observation_obj
+        nonlocal stall_watchdog_steps, pending_plan
+        if pending_plan is None:
+            return
+        start = time.perf_counter()
+        frames = max(1, int(frames_per_pump))
+        while pending_plan is not None and (time.perf_counter() - start) < max_seconds:
+            try:
+                idle_action = PokemonAction("WAIT", {"frames": frames})
+                observation = overworld.step(idle_action)
+            except Exception:
+                LOGGER.exception("Idle pump failed while waiting for planner; aborting wait loop.")
+                break
+            last_snapshot = ingest_overworld_observation(executor, observation)
+            last_observation_obj = observation
+            stall_watchdog_steps = 0
+            outcome = finalize_pending_plan(block=False)
+            if outcome is not None:
+                break
+    def _naming_overlay_open(snapshot: Mapping[str, object]) -> bool:
+        ow = snapshot.get("overworld")
+        return isinstance(ow, Mapping) and isinstance(ow.get("naming_screen"), Mapping)
+
+    def _naming_signature(snapshot: Mapping[str, object]) -> Optional[str]:
+        if not isinstance(snapshot, Mapping):
+            return None
+        overworld = snapshot.get("overworld")
+        if not isinstance(overworld, Mapping):
+            return None
+        naming = overworld.get("naming_screen")
+        if not isinstance(naming, Mapping):
+            return None
+        signature: Dict[str, Any] = {}
+        cursor = naming.get("cursor")
+        if isinstance(cursor, Mapping):
+            signature["cursor"] = {
+                "row": cursor.get("row"),
+                "col": cursor.get("col"),
+                "letter": cursor.get("letter"),
+            }
+        dialog_lines = naming.get("dialog_lines")
+        if isinstance(dialog_lines, list):
+            signature["dialog_lines"] = [str(line) for line in dialog_lines[:4]]
+        history = naming.get("cursor_history")
+        if isinstance(history, list) and history:
+            tail = history[-1]
+            if isinstance(tail, Mapping):
+                signature["cursor_history_tail"] = {
+                    "row": tail.get("row"),
+                    "col": tail.get("col"),
+                    "letter": tail.get("letter"),
+                }
+        overlay_dialog = overworld.get("dialog_lines")
+        if isinstance(overlay_dialog, list):
+            signature["overlay_dialog"] = [str(line) for line in overlay_dialog[:4]]
+        if not signature:
+            return None
+        try:
+            return json.dumps(signature, sort_keys=True)
+        except TypeError:
+            def _to_serialisable(value: Any) -> Any:
+                if isinstance(value, (list, tuple)):
+                    return [_to_serialisable(item) for item in value]
+                if isinstance(value, Mapping):
+                    return {str(key): _to_serialisable(val) for key, val in value.items()}
+                return value
+            return json.dumps(_to_serialisable(signature), sort_keys=True)
+
+    def _is_probably_a_spam(planlet_spec: object) -> bool:
+        try:
+            script = getattr(planlet_spec, "script", None)
+            if not isinstance(script, Iterable):
+                return False
+            for entry in script:
+                if not isinstance(entry, Mapping):
+                    continue
+                if str(entry.get("op")).upper() != "MENU_SEQUENCE":
+                    continue
+                buttons = entry.get("buttons")
+                if not isinstance(buttons, Iterable):
+                    continue
+                unique_buttons = {str(btn).upper() for btn in buttons if btn is not None}
+                if unique_buttons and unique_buttons <= {"A"}:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    NAMING_STALL_THRESHOLD = 5
+    naming_signature_prev = _naming_signature(last_snapshot)
+    naming_repeat_planlet_id: Optional[str] = None
+    naming_repeat_count = 0
+
+    prev_overworld_ready = _overworld_ready(last_snapshot)
+
     try:
         while running and step < args.steps:
-            finalize_outcome = finalize_pending_plan()
+            finalize_outcome = finalize_pending_plan(block=False)
             if finalize_outcome is False and planner_failure_count >= planner_failure_limit:
                 LOGGER.error("Planner failure threshold reached; aborting run.")
                 break
+            current_overworld_ready = _overworld_ready(last_snapshot)
+            if current_overworld_ready and not prev_overworld_ready:
+                ow = last_snapshot.get("overworld") if isinstance(last_snapshot, Mapping) else {}
+                tiles = ow.get("tiles")
+                tile_count = len(tiles) if isinstance(tiles, list) else 0
+                map_id = (ow.get("map") or {}).get("id") if isinstance(ow.get("map"), Mapping) else None
+                LOGGER.info(
+                    "Overworld now ready (map_id=%s tiles=%s pending_plan=%s)",
+                    map_id,
+                    tile_count,
+                    bool(pending_plan),
+                )
+            prev_overworld_ready = current_overworld_ready
+            if _overworld_ready(last_snapshot) and pending_plan is None:
+                current_planlet_obj = getattr(executor.state, "current_planlet", None)
+                current_spec = getattr(current_planlet_obj, "spec", None) if current_planlet_obj is not None else None
+                current_kind = getattr(current_spec, "kind", None) if current_spec is not None else None
+                if current_kind == "MENU_SEQUENCE":
+                    LOGGER.info(
+                        "Overlay cleared while MENU_SEQUENCE %s active; cancelling macro and requesting navigation plan.",
+                        current_spec.id if current_spec is not None else None,
+                    )
+                    try:
+                        executor.monitor.clear_planlet(current_spec.id)  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    executor.state.current_planlet = None
+                    executor.state.current_skill = None
+                    load_new_plan("overlay_cleared", last_snapshot, observation_obj=last_observation_obj)
+                    _idle_pump_until_plan(max_seconds=6.0, frames_per_pump=1)
+                    continue
+            if _naming_overlay_open(last_snapshot):
+                current_planlet = getattr(executor.state, "current_planlet", None)
+                planlet_spec = getattr(current_planlet, "spec", None)
+                active_kind = getattr(planlet_spec, "kind", None) if planlet_spec is not None else None
+                active_format = getattr(planlet_spec, "format", None) if planlet_spec is not None else None
+                wrong_kind = active_kind != "MENU_SEQUENCE"
+                wrong_format = not (isinstance(active_format, str) and "name" in active_format.lower())
+                bad_macro = _is_probably_a_spam(planlet_spec)
+                if pending_plan is not None or wrong_kind or wrong_format or bad_macro:
+                    if pending_plan is None:
+                        load_new_plan("overlay:naming", last_snapshot, observation_obj=last_observation_obj)
+                    _idle_pump_until_plan(max_seconds=12.0, frames_per_pump=1)
+                    stall_watchdog_steps = 0
+                    continue
             try:
                 result = executor.step(observation)
             except TraceValidationError as exc:
@@ -881,11 +1385,11 @@ def main() -> int:
                 observation = overworld.step(pokemon_action)
             except Exception:
                 LOGGER.exception("PyBoy adapter step failed; forcing replan.")
-                time.sleep(0.1)
                 last_snapshot = ingest_overworld_observation(executor, observation)
                 last_observation_obj = observation
                 last_step_counter = extract_step_counter_from_observation(observation)
                 load_new_plan("adapter_error", last_snapshot, observation_obj=observation)
+                _idle_pump_until_plan(max_seconds=3.0, frames_per_pump=args.frames_per_step)
                 continue
 
             current_counter = extract_step_counter_from_observation(observation)
@@ -901,6 +1405,44 @@ def main() -> int:
             else:
                 last_planlet_id = None
                 planlet_watchdog_steps = 0
+
+            current_naming_signature = _naming_signature(last_snapshot)
+            if _naming_overlay_open(last_snapshot) and active_planlet is not None and current_naming_signature is not None:
+                if (
+                    active_planlet.id == naming_repeat_planlet_id
+                    and naming_signature_prev == current_naming_signature
+                ):
+                    naming_repeat_count += 1
+                else:
+                    naming_repeat_planlet_id = active_planlet.id
+                    naming_repeat_count = 1
+                if NAMING_STALL_THRESHOLD > 0 and naming_repeat_count >= NAMING_STALL_THRESHOLD:
+                    LOGGER.warning(
+                        "Naming stall detected for planlet %s after %s unchanged overlays; invalidating cached macro.",
+                        active_planlet.id,
+                        naming_repeat_count,
+                    )
+                    if plan_coordinator.has_planner():
+                        service = plan_coordinator.service
+                        if service is not None:
+                            service.record_feedback(active_planlet.id, success=False)
+                            service.invalidate_cached_planlet(planlet_id=active_planlet.id)
+                    last_snapshot = ingest_overworld_observation(executor, observation)
+                    last_observation_obj = observation
+                    load_new_plan("naming_stall", last_snapshot, observation_obj=observation)
+                    naming_repeat_planlet_id = None
+                    naming_repeat_count = 0
+                    naming_signature_prev = _naming_signature(last_snapshot)
+                    planlet_watchdog_steps = 0
+                    stall_watchdog_steps = 0
+                    last_planlet_id = None
+                    last_step_counter = current_counter
+                    _idle_pump_until_plan(max_seconds=6.0, frames_per_pump=1)
+                    continue
+            else:
+                naming_repeat_planlet_id = None
+                naming_repeat_count = 0
+            naming_signature_prev = current_naming_signature
 
             if planlet_watchdog_threshold > 0 and planlet_watchdog_steps >= planlet_watchdog_threshold:
                 LOGGER.warning(
