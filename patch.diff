@@ -1,0 +1,45 @@
+*** Update File: sr-fbam-mvp/scripts/run_overworld_controller.py
+@@
+-        if snapshot:
+-            plan.setdefault("environment", {})["overworld_snapshot"] = snapshot
+-        return plan
++        if snapshot:
++            self._update_mission_objective(snapshot)
++            plan.setdefault("environment", {})["overworld_snapshot"] = snapshot
++        return plan
++
++    def _update_mission_objective(self, snapshot: Mapping[str, Any]) -> None:
++        if not isinstance(snapshot, Mapping):
++            return
++        overlay_state = snapshot.get("overlay_state")
++        if isinstance(overlay_state, Mapping):
++            if overlay_state.get("dialog_open") or overlay_state.get("menu_overlay") or overlay_state.get("naming_active"):
++                return
++        progress = self._mission_plan.setdefault("progress", {})
++        if progress.get("current_objective") != "Leave the bedroom and reach Professor Oak.":
++            progress["current_objective"] = "Leave the bedroom and reach Professor Oak."
++        targets = snapshot.get("targets")
++        if isinstance(targets, list) and targets:
++            door_target = None
++            for target in targets:
++                if not isinstance(target, Mapping):
++                    continue
++                terrain = target.get("terrain")
++                special = target.get("special")
++                if terrain in {"door", "stairs"} or special in {"warp", "door"}:
++                    door_target = target
++                    break
++            if door_target is None:
++                for target in targets:
++                    if isinstance(target, Mapping):
++                        door_target = target
++                        break
++            if isinstance(door_target, Mapping):
++                environment = self._mission_plan.setdefault("environment", {})
++                environment["next_nav_target"] = {
++                    "tile": door_target.get("tile"),
++                    "terrain": door_target.get("terrain"),
++                    "special": door_target.get("special"),
++                    "distance": door_target.get("distance"),
++                }
+*** End Patch

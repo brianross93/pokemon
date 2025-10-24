@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from pkmn_battle.graph.memory import GraphMemory
 from pkmn_battle.summarizer import GraphSummary, summarize_for_llm
@@ -26,6 +29,45 @@ OVERWORLD_PLANLET_KINDS = {
     "WAIT",
     "HANDLE_ENCOUNTER",
 }
+
+
+def _normalise_buttons(buttons: Sequence[Any]) -> set[str]:
+    return {str(btn).upper() for btn in buttons if btn is not None}
+
+
+def _is_single_button_menu(planlet: Mapping[str, Any]) -> bool:
+    try:
+        if str(planlet.get("kind", "")).upper() != "MENU_SEQUENCE":
+            return False
+        collected: List[Any] = []
+        args = planlet.get("args")
+        if isinstance(args, Mapping) and isinstance(args.get("buttons"), list):
+            collected.extend(args["buttons"])
+        for entry in planlet.get("script") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            if str(entry.get("op", "")).upper() != "MENU_SEQUENCE":
+                continue
+            buttons = entry.get("buttons")
+            if isinstance(buttons, list):
+                collected.extend(buttons)
+        if not collected:
+            return False
+        normalised = _normalise_buttons(collected)
+        return bool(normalised) and normalised <= {"A"}
+    except Exception:
+        return False
+
+
+def _hash_digest(value: object) -> str:
+    try:
+        payload = json.dumps(value, sort_keys=True, default=str)
+    except Exception:
+        payload = repr(value)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+DISABLE_NAMING_CACHE = os.getenv("FBAM_DISABLE_NAMING_CACHE", "0") == "1"
 
 
 @dataclass
@@ -86,6 +128,8 @@ class PlanletService:
         allow_search: bool = True,
         frame_image: Optional[bytes] = None,
         mission_plan: Optional[Mapping[str, Any]] = None,
+        reason: str = "",
+        force_fresh: bool = False,
     ) -> PlanletProposal:
         world_summary = summarize_world_for_llm(memory, nearby_limit=nearby_limit)
         graph_summary = GraphSummary(
@@ -94,22 +138,61 @@ class PlanletService:
             format=world_summary.map_id,
             data={"overworld": world_summary.to_payload()},
         )
-        cache_key: Optional[str] = None
-        if self.cache is not None:
-            cache_key = self.cache.overworld_key(world_summary, nearby_limit=nearby_limit)
-            hit = self.cache.lookup(cache_key)
-            if hit is not None:
-                proposal = self._proposal_from_cache(graph_summary, hit)
-                self._register_planlet(proposal.planlet.get("planlet_id"), cache_key)
-                self._persist_planlet(world_summary, proposal)
-                return proposal
 
-        graph_summary = GraphSummary(
-            turn=0,
-            side=world_summary.side,
-            format=world_summary.map_id,
-            data={"overworld": world_summary.to_payload()},
+        snapshot = None
+        if isinstance(mission_plan, Mapping):
+            environment = mission_plan.get("environment")
+            if isinstance(environment, Mapping):
+                snapshot = environment.get("overworld_snapshot")
+
+        naming_active = False
+        cursor_present = False
+        presets_present = False
+        screen_state = None
+        if isinstance(snapshot, Mapping):
+            overlay_state = snapshot.get("overlay_state")
+            if isinstance(overlay_state, Mapping):
+                naming_active = bool(overlay_state.get("naming_active"))
+            naming_screen = snapshot.get("naming_screen")
+            if isinstance(naming_screen, Mapping):
+                cursor_present = isinstance(naming_screen.get("cursor"), Mapping)
+                presets_present = bool(naming_screen.get("presets"))
+            menus_snapshot = snapshot.get("menus")
+            if isinstance(menus_snapshot, list):
+                for menu in menus_snapshot:
+                    if isinstance(menu, Mapping) and menu.get("path") == ["SCREEN"]:
+                        screen_state = menu.get("state")
+                        break
+
+        cache_key: Optional[str] = None
+        should_skip_cache = force_fresh or (
+            reason.startswith("overlay:naming")
+            and (DISABLE_NAMING_CACHE or (naming_active and (not cursor_present or not presets_present)))
         )
+
+        if self.cache is not None:
+            base_key = self.cache.overworld_key(world_summary, nearby_limit=nearby_limit)
+            suffix_parts = [reason or ""]
+            if screen_state:
+                suffix_parts.append(str(screen_state))
+            if naming_active:
+                suffix_parts.append(_hash_digest(snapshot.get("naming_screen") if isinstance(snapshot, Mapping) else None))
+            cache_key = "::".join([part for part in [base_key, *suffix_parts] if part])
+
+            if should_skip_cache and cache_key:
+                self.cache.record_feedback(cache_key, success=False, weight=1.0)
+            if not should_skip_cache:
+                hit = self.cache.lookup(cache_key)
+                if hit is not None and _is_single_button_menu(hit.planlet):
+                    self.cache.record_feedback(hit.cache_key, success=False, weight=1.0)
+                    self.cache.invalidate(key=hit.cache_key)
+                    hit = None
+                if hit is not None:
+                    proposal = self._proposal_from_cache(graph_summary, hit)
+                    self._register_planlet(proposal.planlet.get("planlet_id"), cache_key)
+                    self._persist_planlet(world_summary, proposal)
+                    return proposal
+
         proposal = self.proposer.generate_planlet(
             graph_summary,
             self.client,
@@ -117,9 +200,18 @@ class PlanletService:
             frame_image=frame_image,
             mission_plan=mission_plan,
         )
+        import logging
+        logging.getLogger("halt.plan").info("Planlet proposal: %s", proposal.planlet)
         proposal.cache_key = cache_key
         self._persist_planlet(world_summary, proposal)
-        if self.cache is not None and cache_key is not None:
+
+        if (
+            self.cache is not None
+            and cache_key is not None
+            and not force_fresh
+            and not should_skip_cache
+            and not _is_single_button_menu(proposal.planlet)
+        ):
             self.cache.store(
                 cache_key,
                 proposal.planlet,

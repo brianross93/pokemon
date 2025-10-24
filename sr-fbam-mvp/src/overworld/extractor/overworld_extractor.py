@@ -41,6 +41,12 @@ class OverworldExtractor:
         self._last_dialog_hash: Optional[str] = None
         self._naming_cursor_history: Deque[Dict[str, object]] = deque(maxlen=8)
 
+    def reset_state(self) -> None:
+        """Clear cached payload/dialog/naming history between runs."""
+        self._last_payload = None
+        self._last_dialog_hash = None
+        self._naming_cursor_history.clear()
+
     # ------------------------------------------------------------------ #
     # Observation normalisation
     # ------------------------------------------------------------------ #
@@ -517,6 +523,30 @@ class OverworldExtractor:
         raw_hash = observation.metadata.get("raw_frame_hash") or observation.frame_hash()
         menus: List[Dict[str, object]] = []
 
+        title_overlay = False
+        screen_hint = observation.metadata.get("screen") if isinstance(observation.metadata, Mapping) else None
+        if (
+            not dialog_open
+            and not menu_overlay
+            and isinstance(screen_hint, Mapping)
+            and isinstance(screen_hint.get("tile_ids"), list)
+        ):
+            tile_ids = screen_hint.get("tile_ids")
+            total = 0
+            blank = 0
+            try:
+                for row in tile_ids:
+                    if not isinstance(row, list):
+                        continue
+                    for value in row:
+                        total += 1
+                        if int(value) == 383:
+                            blank += 1
+                if total > 0 and blank / total >= 0.7:
+                    title_overlay = True
+            except Exception:
+                title_overlay = False
+
         if dialog_open:
             menus.append(
                 {
@@ -531,11 +561,12 @@ class OverworldExtractor:
                 "state": raw_hash,
                 "hash": raw_hash,
             }
-        elif menu_overlay:
+        elif menu_overlay or title_overlay:
+            menu_overlay = True
             menus.append(
                 {
                     "id": f"overlay:{raw_hash}",
-                    "path": ["OVERLAY"],
+                    "path": ["OVERLAY", "TITLE"] if title_overlay else ["OVERLAY"],
                     "open": True,
                     "state": raw_hash,
                 }
@@ -931,7 +962,6 @@ class OverworldExtractor:
     NAMING_TILESET: Dict[int, str] = {}
     for idx, ch in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
         NAMING_TILESET[0x80 + idx] = ch
-        NAMING_TILESET[0xA0 + idx] = ch.lower()
     NAMING_TILESET.update(
         {
             0x7A: "END",
@@ -945,22 +975,6 @@ class OverworldExtractor:
             0xFD: "7",
             0xFE: "8",
             0xFF: "9",
-            0xE6: ".",
-            0xE7: ",",
-            0xE8: "'",
-            0xE9: "…",
-            0xEA: "“",
-            0xEB: "”",
-            0xEC: "‘",
-            0xED: "’",
-            0xEE: "☀",
-            0xEF: "♪",
-            0xF0: "%",
-            0xF1: "×",
-            0xF2: "÷",
-            0xF3: "=",
-            0xF4: "+",
-            0xF5: "-",
         }
     )
 
@@ -1011,95 +1025,76 @@ class OverworldExtractor:
             for menu in menus:
                 if not isinstance(menu, Mapping):
                     continue
+                if not bool(menu.get("open", False)):
+                    continue
                 menu_id = str(menu.get("id") or "")
                 path = menu.get("path") or []
                 if "overlay" in menu_id.lower() or any("overlay" in str(part).lower() for part in path):
                     overlay_present = True
                     break
-        else:
-            menus = []
-
-        tiles = overworld.get("tiles")
-        if not isinstance(tiles, list) or not tiles:
-            return None
-        tile_lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
-        for tile in tiles:
-            if not isinstance(tile, Mapping):
-                continue
-            try:
-                sx = int(tile.get("screen", {}).get("x"))
-                sy = int(tile.get("screen", {}).get("y"))
-            except Exception:
-                continue
-            tile_lookup[(sx, sy)] = dict(tile)
-
-        frame_meta = overworld.get("frame")
-        frame_hash = None
-        if isinstance(frame_meta, Mapping):
-            frame_hash = frame_meta.get("hash")
-        # Heuristic for naming grid region: rows ~8-18 (doubling screen coordinate), cols wide middle portion.
-        naming_entries: List[Dict[str, object]] = []
-        tiles_per_row = 20  # Game Boy tiles horizontally when doubled from 40 px
-        tiles_per_col = 18  # vertical
-        for sy in range(tiles_per_col):
-            for sx in range(tiles_per_row):
-                tile = tile_lookup.get((sx, sy))
-                if tile is None:
-                    continue
-                tile_id = tile.get("tile_id")
-                if not isinstance(tile_id, int):
-                    continue
-                glyph = self.NAMING_TILESET.get(tile_id)
-                if glyph is None:
-                    continue
-                world_x = int(tile.get("x", 0))
-                world_y = int(tile.get("y", 0))
-                entry: Dict[str, object] = {
-                    "letter": glyph,
-                    "tile_id": tile_id,
-                    "screen": {"x": sx, "y": sy},
-                    "world": {"x": world_x, "y": world_y},
-                }
-                if glyph.upper() in {"ED", "END"}:
-                    entry["role"] = "END"
-                elif glyph.upper() in {"PK", "MN"}:
-                    entry["role"] = glyph.upper()
-                naming_entries.append(entry)
-
-        if not naming_entries:
-            if not overlay_present:
-                self._naming_cursor_history.clear()
-            return None
-
-        if not overlay_present and len(naming_entries) < 40:
+        if not overlay_present:
             self._naming_cursor_history.clear()
             return None
 
-        # Normalize rows/columns.
-        unique_rows = sorted({entry["screen"]["y"] for entry in naming_entries})
-        grid_letters: List[List[str]] = []
+        tiles = overworld.get("tiles")
+        if not isinstance(tiles, list) or not tiles:
+            self._naming_cursor_history.clear()
+            return None
+
+        tile_lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
+        letter_entries: List[Dict[str, object]] = []
+        for tile in tiles:
+            if not isinstance(tile, Mapping):
+                continue
+            screen_info = tile.get("screen")
+            if not isinstance(screen_info, Mapping):
+                continue
+            try:
+                sx = int(screen_info.get("x"))
+                sy = int(screen_info.get("y"))
+                tile_id = int(tile.get("tile_id"))
+            except Exception:
+                continue
+            tile_lookup[(sx, sy)] = dict(tile)
+            if 0x80 <= tile_id <= 0xFF:
+                glyph = self.NAMING_TILESET.get(tile_id)
+                if glyph is None:
+                    continue
+                entry = {
+                    "letter": glyph,
+                    "tile_id": tile_id,
+                    "screen": {"x": sx, "y": sy},
+                    "world": {"x": int(tile.get("x", 0)), "y": int(tile.get("y", 0))},
+                }
+                letter_entries.append(entry)
+
+        if len(letter_entries) < 60:
+            return None
+        if not any(entry["tile_id"] == 0x7A for entry in letter_entries):
+            return None
+
+        unique_rows = sorted({entry["screen"]["y"] for entry in letter_entries})
         row_entries: List[List[Dict[str, object]]] = []
+        grid_letters: List[List[str]] = []
         for row_idx, sy in enumerate(unique_rows):
-            row = [entry for entry in naming_entries if entry["screen"]["y"] == sy]
+            row = [entry for entry in letter_entries if entry["screen"]["y"] == sy]
+            if not row:
+                continue
             row.sort(key=lambda item: item["screen"]["x"])
             for col_idx, entry in enumerate(row):
                 entry["grid"] = {"row": row_idx, "col": col_idx}
             row_entries.append(row)
             grid_letters.append([entry["letter"] for entry in row])
 
-        # Attempt to infer cursor by projecting sprite positions.
         cursor: Optional[Dict[str, object]] = None
-        viewport_meta = None
-        if isinstance(metadata, Mapping):
-            viewport_meta = metadata.get("game_area") or metadata.get("screen")
-        sprites = viewport_meta.get("sprites") if isinstance(viewport_meta, Mapping) else None
+        viewport = metadata.get("game_area") if isinstance(metadata, Mapping) else None
+        viewport = viewport or metadata.get("screen") if isinstance(metadata, Mapping) else None
+        sprites = viewport.get("sprites") if isinstance(viewport, Mapping) else None
         if isinstance(sprites, list):
             best_entry: Optional[Dict[str, object]] = None
             best_dist = float("inf")
             for sprite in sprites:
-                if not isinstance(sprite, Mapping):
-                    continue
-                if not bool(sprite.get("on_screen", True)):
+                if not isinstance(sprite, Mapping) or not bool(sprite.get("on_screen", True)):
                     continue
                 sprite_screen = sprite.get("screen")
                 if not isinstance(sprite_screen, Mapping):
@@ -1113,10 +1108,8 @@ class OverworldExtractor:
                     sy = int(sy)
                 except Exception:
                     continue
-                for entry in naming_entries:
-                    ex = entry["screen"]["x"]
-                    ey = entry["screen"]["y"]
-                    dist = abs(ex - sx) + abs(ey - sy)
+                for entry in letter_entries:
+                    dist = abs(entry["screen"]["x"] - sx) + abs(entry["screen"]["y"] - sy)
                     if dist < best_dist:
                         best_dist = dist
                         best_entry = entry
@@ -1129,6 +1122,11 @@ class OverworldExtractor:
                     "world": dict(best_entry["world"]),
                     "source": "sprite",
                 }
+
+        frame_meta = overworld.get("frame")
+        frame_hash = None
+        if isinstance(frame_meta, Mapping):
+            frame_hash = frame_meta.get("hash")
 
         if cursor is None and self._naming_cursor_history:
             last = self._naming_cursor_history[-1]
@@ -1152,57 +1150,54 @@ class OverworldExtractor:
             }
             self._naming_cursor_history.append(history_entry)
 
+        # detect presets
         presets: List[Dict[str, object]] = []
-
-        def _flush_run(run: List[Dict[str, object]]) -> None:
-            if not run:
-                return
-            word = "".join(entry.get("letter", "") for entry in run)
-            if len(word) < 3 or len(word) > 5:
-                return
-            if not all(ch.isalpha() for ch in word):
-                return
-            start = run[0]
-            presets.append(
-                {
-                    "label": word.upper(),
-                    "row": start["grid"]["row"],
-                    "col": start["grid"]["col"],
-                    "length": len(word),
-                    "screen": dict(start.get("screen", {})),
-                }
-            )
-
         for row in row_entries:
-            current_run: List[Dict[str, object]] = []
+            buffer: List[Dict[str, object]] = []
             for entry in row:
-                letter = entry.get("letter")
-                if isinstance(letter, str) and len(letter) == 1 and letter.isalpha():
-                    current_run.append(entry)
+                if len(entry["letter"]) == 1 and entry["letter"].isalpha():
+                    buffer.append(entry)
                 else:
-                    _flush_run(current_run)
-                    current_run = []
-            _flush_run(current_run)
+                    if buffer:
+                        word = "".join(e["letter"] for e in buffer)
+                        presets.append(
+                            {
+                                "label": word,
+                                "row": buffer[0]["grid"]["row"],
+                                "col": buffer[0]["grid"]["col"],
+                            }
+                        )
+                        buffer = []
+            if buffer:
+                word = "".join(e["letter"] for e in buffer)
+                presets.append(
+                    {
+                        "label": word,
+                        "row": buffer[0]["grid"]["row"],
+                        "col": buffer[0]["grid"]["col"],
+                    }
+                )
         if presets:
-            deduped_presets: List[Dict[str, object]] = []
+            unique = []
             seen = set()
             for preset in presets:
                 key = (preset["label"], preset["row"], preset["col"])
                 if key in seen:
                     continue
                 seen.add(key)
-                deduped_presets.append(preset)
-            presets = deduped_presets
+                unique.append(preset)
+            presets = unique
 
-        dialog_lines: Optional[List[str]] = None
-        existing_dialog = overworld.get("dialog_lines")
-        if isinstance(existing_dialog, list):
-            cleaned = [str(line).strip() for line in existing_dialog if isinstance(line, str) and line.strip()]
-            if cleaned:
-                dialog_lines = cleaned[:4]
+        # dialog lines from overworld
+        dialog_lines = []
+        raw_dialog = overworld.get("dialog_lines")
+        if isinstance(raw_dialog, list):
+            for line in raw_dialog:
+                if isinstance(line, str) and line.strip():
+                    dialog_lines.append(line.strip())
 
         naming_state: Dict[str, object] = {
-            "entries": naming_entries,
+            "entries": letter_entries,
             "grid_letters": grid_letters,
         }
         if cursor is not None:
@@ -1212,9 +1207,12 @@ class OverworldExtractor:
         if presets:
             naming_state["presets"] = presets
         if dialog_lines:
-            naming_state["dialog_lines"] = dialog_lines
-
-        return naming_state
+            naming_state["dialog_lines"] = dialog_lines[:4]
+        if naming_state.get("cursor"):
+            import logging
+            logging.getLogger("naming").debug("naming_snapshot: %s", naming_state)
+            return naming_state
+        return None
 
     def _tile_to_char(self, tile_id: int) -> str:
         for lower, upper, mode in self.DIALOG_CHAR_RANGES:

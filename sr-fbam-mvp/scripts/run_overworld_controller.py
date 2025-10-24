@@ -210,7 +210,11 @@ DEFAULT_MISSION_PLAN: Dict[str, Any] = {
     "mission": "Defeat the Elite Four and collect all eight badges.",
     "progress": {
         "badges_collected": 0,
-        "current_objective": "Leave the bedroom and reach Professor Oak's lab."
+        "current_objective": "Leave the bedroom and reach Professor Oak's lab.",
+        "player_name": "BENNY",
+        "rival_name": "JH",
+        "player_named": False,
+        "rival_named": False,
     },
     "planlets": {
         "pending": [],
@@ -271,18 +275,6 @@ class PlanCoordinator:
             self._search_notice_logged = True
         frame_bytes = self._encode_observation(observation)
         mission_plan_payload = self._mission_plan_for_prompt()
-        if mission_plan_payload:
-            snapshot = mission_plan_payload.get("environment", {}).get("overworld_snapshot")
-            if isinstance(snapshot, Mapping):
-                naming_payload = snapshot.get("naming_screen")
-                overlay_payload = snapshot.get("overlay_state")
-                self._logger.info(
-                    "Mission plan snapshot: naming=%s overlay=%s cursor=%s presets=%s",
-                    bool(naming_payload),
-                    bool(overlay_payload),
-                    naming_payload.get("cursor") if isinstance(naming_payload, Mapping) else None,
-                    naming_payload.get("presets") if isinstance(naming_payload, Mapping) else None,
-                )
         try:
             proposal = self.service.request_overworld_planlet(
                 self.executor.memory,
@@ -458,8 +450,44 @@ class PlanCoordinator:
                     menus[:3] if isinstance(menus, list) else menus,
                 )
         if snapshot:
+            self._update_mission_objective(snapshot)
             plan.setdefault("environment", {})["overworld_snapshot"] = snapshot
         return plan
+
+    def _update_mission_objective(self, snapshot: Mapping[str, Any]) -> None:
+        if not isinstance(snapshot, Mapping):
+            return
+        overlay_state = snapshot.get("overlay_state")
+        if isinstance(overlay_state, Mapping):
+            if overlay_state.get("dialog_open") or overlay_state.get("menu_overlay") or overlay_state.get("naming_active"):
+                return
+        progress = self._mission_plan.setdefault("progress", {})
+        if progress.get("current_objective") != "Leave the bedroom and reach Professor Oak.":
+            progress["current_objective"] = "Leave the bedroom and reach Professor Oak."
+        targets = snapshot.get("targets")
+        if isinstance(targets, list) and targets:
+            door_target = None
+            for target in targets:
+                if not isinstance(target, Mapping):
+                    continue
+                terrain = target.get("terrain")
+                special = target.get("special")
+                if terrain in {"door", "stairs"} or special in {"warp", "door"}:
+                    door_target = target
+                    break
+            if door_target is None:
+                for target in targets:
+                    if isinstance(target, Mapping):
+                        door_target = target
+                        break
+            if isinstance(door_target, Mapping):
+                environment = self._mission_plan.setdefault("environment", {})
+                environment["next_nav_target"] = {
+                    "tile": door_target.get("tile"),
+                    "terrain": door_target.get("terrain"),
+                    "special": door_target.get("special"),
+                    "distance": door_target.get("distance"),
+                }
 
     def _overworld_snapshot_for_prompt(self) -> Optional[Dict[str, Any]]:
         extractor = getattr(self.executor, "extractor", None)
@@ -547,25 +575,6 @@ class PlanCoordinator:
         if self._recent_dialog:
             snapshot["recent_dialog"] = list(self._recent_dialog)
 
-        naming = overworld.get("naming_screen")
-        if isinstance(naming, Mapping):
-            naming_snapshot: Dict[str, Any] = {
-                "grid_letters": naming.get("grid_letters"),
-                "cursor": naming.get("cursor"),
-            }
-            if isinstance(naming.get("cursor_history"), list):
-                naming_snapshot["cursor_history"] = naming.get("cursor_history")[:8]
-            if isinstance(naming.get("presets"), list):
-                naming_snapshot["presets"] = naming.get("presets")
-            if isinstance(naming.get("dialog_lines"), list):
-                naming_snapshot["dialog_lines"] = naming.get("dialog_lines")
-            snapshot["naming_screen"] = naming_snapshot
-            self._logger.info(
-                "Snapshot naming cursor=%s presets=%s",
-                naming_snapshot.get("cursor"),
-                naming_snapshot.get("presets"),
-            )
-
         menus = overworld.get("menus")
         if isinstance(menus, list):
             snapshot["menus"] = [
@@ -574,20 +583,27 @@ class PlanCoordinator:
                 if isinstance(menu, Mapping)
             ]
 
-        overlay_state: Dict[str, Any] = {}
-        if isinstance(overworld.get("dialog"), Mapping):
-            overlay_state["dialog_open"] = True
+        naming_screen = overworld.get("naming_screen")
+        naming_active = isinstance(naming_screen, Mapping)
+        dialog_open = isinstance(overworld.get("dialog"), Mapping)
+        menu_overlay = False
         if isinstance(menus, list):
-            overlay_state["menu_overlay"] = any(
+            menu_overlay = any(
                 bool(menu.get("open"))
                 and any("OVERLAY" in str(part).upper() for part in (menu.get("path") or []))
                 for menu in menus
                 if isinstance(menu, Mapping)
             )
-        if isinstance(naming, Mapping):
-            overlay_state["naming_active"] = True
-        if overlay_state:
-            snapshot["overlay_state"] = overlay_state
+
+        overlay_state: Dict[str, Any] = {
+            "dialog_open": bool(dialog_open),
+            "menu_overlay": bool(menu_overlay),
+            "naming_active": bool(naming_active),
+        }
+        snapshot["overlay_state"] = overlay_state
+
+        if naming_active:
+            snapshot["naming_screen"] = copy.deepcopy(naming_screen)  # type: ignore[arg-type]
 
         adjacency = overworld.get("tile_adjacency")
         if isinstance(adjacency, Mapping) and adjacency:
@@ -727,8 +743,15 @@ class PlanCoordinator:
 
     def handle_plan_event(self, event: Any) -> None:
         status = getattr(event, "status", "")
+        planlet_id = getattr(event, "planlet_id", None)
         if status == "PLANLET_COMPLETE":
-            self.mark_planlet_completed(getattr(event, "planlet_id", None))
+            self.mark_planlet_completed(planlet_id)
+            if self.service is not None and planlet_id:
+                self.service.record_feedback(planlet_id, success=True, weight=1.0)
+        elif status == "PLANLET_STALLED":
+            if self.service is not None and planlet_id:
+                self.service.record_feedback(planlet_id, success=False, weight=2.0)
+                self.service.invalidate_cached_planlet(planlet_id=planlet_id)
 
 
 def _deep_merge(target: Dict[str, Any], updates: Mapping[str, Any]) -> None:
@@ -924,6 +947,11 @@ def main() -> int:
     overworld = OverworldAdapter(adapter)
 
     executor = OverworldExecutor()
+    if hasattr(executor.extractor, "reset_state"):
+        try:
+            executor.extractor.reset_state()  # type: ignore[attr-defined]
+        except Exception:
+            LOGGER.exception("Failed to reset overworld extractor state at startup.")
     mission_plan = copy.deepcopy(DEFAULT_MISSION_PLAN)
     planner_service, backend_label = build_planlet_service(args)
     if planner_service is None:
@@ -975,6 +1003,19 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     observation = overworld.reset()
+    try:
+        metadata_keys = list((observation.metadata or {}).keys())
+        screen_meta = observation.metadata.get("screen") if isinstance(observation.metadata, Mapping) else None
+        screen_state = None
+        if isinstance(screen_meta, Mapping):
+            screen_state = screen_meta.get("state")
+            if screen_state is None:
+                tile_ids = screen_meta.get("tile_ids")
+                if isinstance(tile_ids, list) and tile_ids and isinstance(tile_ids[0], list) and tile_ids[0]:
+                    screen_state = f"tiles:{len(tile_ids)}x{len(tile_ids[0])}"
+        LOGGER.info("Initial observation metadata keys: %s (screen_state=%s)", metadata_keys, screen_state)
+    except Exception:
+        LOGGER.exception("Failed to log initial observation metadata.")
     if args.policy_boot:
         observation = _policy_bootstrap(overworld, observation, frames_per_step=args.frames_per_step)
 
@@ -996,6 +1037,10 @@ def main() -> int:
         ow = snapshot.get("overworld") if isinstance(snapshot, Mapping) else None
         if not isinstance(ow, Mapping):
             return False
+        overlay_state = ow.get("overlay_state")
+        if isinstance(overlay_state, Mapping):
+            if overlay_state.get("dialog_open") or overlay_state.get("menu_overlay") or overlay_state.get("naming_active"):
+                return True
         menus = ow.get("menus")
         if not isinstance(menus, Iterable):
             return False
@@ -1237,55 +1282,6 @@ def main() -> int:
             outcome = finalize_pending_plan(block=False)
             if outcome is not None:
                 break
-    def _naming_overlay_open(snapshot: Mapping[str, object]) -> bool:
-        ow = snapshot.get("overworld")
-        return isinstance(ow, Mapping) and isinstance(ow.get("naming_screen"), Mapping)
-
-    def _naming_signature(snapshot: Mapping[str, object]) -> Optional[str]:
-        if not isinstance(snapshot, Mapping):
-            return None
-        overworld = snapshot.get("overworld")
-        if not isinstance(overworld, Mapping):
-            return None
-        naming = overworld.get("naming_screen")
-        if not isinstance(naming, Mapping):
-            return None
-        signature: Dict[str, Any] = {}
-        cursor = naming.get("cursor")
-        if isinstance(cursor, Mapping):
-            signature["cursor"] = {
-                "row": cursor.get("row"),
-                "col": cursor.get("col"),
-                "letter": cursor.get("letter"),
-            }
-        dialog_lines = naming.get("dialog_lines")
-        if isinstance(dialog_lines, list):
-            signature["dialog_lines"] = [str(line) for line in dialog_lines[:4]]
-        history = naming.get("cursor_history")
-        if isinstance(history, list) and history:
-            tail = history[-1]
-            if isinstance(tail, Mapping):
-                signature["cursor_history_tail"] = {
-                    "row": tail.get("row"),
-                    "col": tail.get("col"),
-                    "letter": tail.get("letter"),
-                }
-        overlay_dialog = overworld.get("dialog_lines")
-        if isinstance(overlay_dialog, list):
-            signature["overlay_dialog"] = [str(line) for line in overlay_dialog[:4]]
-        if not signature:
-            return None
-        try:
-            return json.dumps(signature, sort_keys=True)
-        except TypeError:
-            def _to_serialisable(value: Any) -> Any:
-                if isinstance(value, (list, tuple)):
-                    return [_to_serialisable(item) for item in value]
-                if isinstance(value, Mapping):
-                    return {str(key): _to_serialisable(val) for key, val in value.items()}
-                return value
-            return json.dumps(_to_serialisable(signature), sort_keys=True)
-
     def _is_probably_a_spam(planlet_spec: object) -> bool:
         try:
             script = getattr(planlet_spec, "script", None)
@@ -1306,11 +1302,6 @@ def main() -> int:
             return False
         return False
 
-    NAMING_STALL_THRESHOLD = 5
-    naming_signature_prev = _naming_signature(last_snapshot)
-    naming_repeat_planlet_id: Optional[str] = None
-    naming_repeat_count = 0
-
     prev_overworld_ready = _overworld_ready(last_snapshot)
 
     try:
@@ -1319,6 +1310,9 @@ def main() -> int:
             if finalize_outcome is False and planner_failure_count >= planner_failure_limit:
                 LOGGER.error("Planner failure threshold reached; aborting run.")
                 break
+            if pending_plan is not None:
+                _idle_pump_until_plan(max_seconds=0.2, frames_per_pump=1)
+                continue
             current_overworld_ready = _overworld_ready(last_snapshot)
             if current_overworld_ready and not prev_overworld_ready:
                 ow = last_snapshot.get("overworld") if isinstance(last_snapshot, Mapping) else {}
@@ -1336,11 +1330,19 @@ def main() -> int:
                 current_planlet_obj = getattr(executor.state, "current_planlet", None)
                 current_spec = getattr(current_planlet_obj, "spec", None) if current_planlet_obj is not None else None
                 current_kind = getattr(current_spec, "kind", None) if current_spec is not None else None
-                if current_kind == "MENU_SEQUENCE":
+                if current_kind == "MENU_SEQUENCE" and planlet_watchdog_steps > 0:
                     LOGGER.info(
                         "Overlay cleared while MENU_SEQUENCE %s active; cancelling macro and requesting navigation plan.",
                         current_spec.id if current_spec is not None else None,
                     )
+                    planlet_id = getattr(current_spec, "id", None)
+                    plan_service = getattr(plan_coordinator, "service", None)
+                    if plan_service is not None and planlet_id:
+                        try:
+                            plan_service.record_feedback(planlet_id, success=False, weight=2.0)
+                            plan_service.invalidate_cached_planlet(planlet_id=planlet_id)
+                        except Exception:
+                            LOGGER.exception("Failed to penalise cached planlet %s", planlet_id)
                     try:
                         executor.monitor.clear_planlet(current_spec.id)  # type: ignore[arg-type]
                     except Exception:
@@ -1349,20 +1351,6 @@ def main() -> int:
                     executor.state.current_skill = None
                     load_new_plan("overlay_cleared", last_snapshot, observation_obj=last_observation_obj)
                     _idle_pump_until_plan(max_seconds=6.0, frames_per_pump=1)
-                    continue
-            if _naming_overlay_open(last_snapshot):
-                current_planlet = getattr(executor.state, "current_planlet", None)
-                planlet_spec = getattr(current_planlet, "spec", None)
-                active_kind = getattr(planlet_spec, "kind", None) if planlet_spec is not None else None
-                active_format = getattr(planlet_spec, "format", None) if planlet_spec is not None else None
-                wrong_kind = active_kind != "MENU_SEQUENCE"
-                wrong_format = not (isinstance(active_format, str) and "name" in active_format.lower())
-                bad_macro = _is_probably_a_spam(planlet_spec)
-                if pending_plan is not None or wrong_kind or wrong_format or bad_macro:
-                    if pending_plan is None:
-                        load_new_plan("overlay:naming", last_snapshot, observation_obj=last_observation_obj)
-                    _idle_pump_until_plan(max_seconds=12.0, frames_per_pump=1)
-                    stall_watchdog_steps = 0
                     continue
             try:
                 result = executor.step(observation)
@@ -1405,44 +1393,6 @@ def main() -> int:
             else:
                 last_planlet_id = None
                 planlet_watchdog_steps = 0
-
-            current_naming_signature = _naming_signature(last_snapshot)
-            if _naming_overlay_open(last_snapshot) and active_planlet is not None and current_naming_signature is not None:
-                if (
-                    active_planlet.id == naming_repeat_planlet_id
-                    and naming_signature_prev == current_naming_signature
-                ):
-                    naming_repeat_count += 1
-                else:
-                    naming_repeat_planlet_id = active_planlet.id
-                    naming_repeat_count = 1
-                if NAMING_STALL_THRESHOLD > 0 and naming_repeat_count >= NAMING_STALL_THRESHOLD:
-                    LOGGER.warning(
-                        "Naming stall detected for planlet %s after %s unchanged overlays; invalidating cached macro.",
-                        active_planlet.id,
-                        naming_repeat_count,
-                    )
-                    if plan_coordinator.has_planner():
-                        service = plan_coordinator.service
-                        if service is not None:
-                            service.record_feedback(active_planlet.id, success=False)
-                            service.invalidate_cached_planlet(planlet_id=active_planlet.id)
-                    last_snapshot = ingest_overworld_observation(executor, observation)
-                    last_observation_obj = observation
-                    load_new_plan("naming_stall", last_snapshot, observation_obj=observation)
-                    naming_repeat_planlet_id = None
-                    naming_repeat_count = 0
-                    naming_signature_prev = _naming_signature(last_snapshot)
-                    planlet_watchdog_steps = 0
-                    stall_watchdog_steps = 0
-                    last_planlet_id = None
-                    last_step_counter = current_counter
-                    _idle_pump_until_plan(max_seconds=6.0, frames_per_pump=1)
-                    continue
-            else:
-                naming_repeat_planlet_id = None
-                naming_repeat_count = 0
-            naming_signature_prev = current_naming_signature
 
             if planlet_watchdog_threshold > 0 and planlet_watchdog_steps >= planlet_watchdog_threshold:
                 LOGGER.warning(

@@ -135,6 +135,9 @@ class PlanletProposer:
                     adjacency_stats = snapshot.get("tile_adjacency_stats")
                     if isinstance(adjacency_stats, Mapping):
                         overworld_payload["tile_adjacency_stats"] = adjacency_stats
+                nav_target = environment.get("next_nav_target") if isinstance(environment, Mapping) else None
+                if isinstance(nav_target, Mapping):
+                    overworld_payload["next_nav_target"] = nav_target
         if overworld_payload:
             payload["overworld"] = overworld_payload
 
@@ -143,9 +146,12 @@ class PlanletProposer:
             "You are acting for side: {side}\n"
             "Overworld summary JSON:\n{state}\n"
             "SAFETY RULES:\n"
-            "- If any menu overlay (DIALOG/OVERLAY) is open or tile adjacency is empty, you MUST return a MENU_SEQUENCE that advances/clears the overlay.\n"
-            "- Only when overlays are closed AND the map is anchored with passable adjacency may you return NAVIGATE_TO or INTERACT planlets.\n"
-            "- While overlay_state.naming_active is true, emit MENU_SEQUENCE planlets only and use naming_screen.cursor (or cursor_history fallback) plus naming_screen.grid_letters/presets to choose letters or presets (e.g., RED, BLUE) before pressing A or END.\n"
+            "- If overlay_state.dialog_open, overlay_state.menu_overlay, or overlay_state.naming_active is true OR tile adjacency is empty, you MUST return a MENU_SEQUENCE that advances/clears the overlay or completes the naming action in progress.\n"
+            "- Once all overlay_state flags are false (dialog/menu/naming cleared), you MUST return a NAVIGATE_TO planlet that progresses toward the mission objective. Use mission_plan.environment.next_nav_target when present; otherwise derive a sensible destination (door, stairs, quest target) from the snapshot. Do NOT emit MENU_SEQUENCE in this situation unless a new overlay appears.\n"
+            "- While naming_screen is present:\n"
+            "  * If dialog_lines mention the player (e.g., \"your name\"), spell the player name exactly as \"BENNY\" (case sensitive) via the grid/presets and confirm with END.\n"
+            "  * If dialog_lines mention the rival (e.g., contain \"RIVAL\" or \"his name\"), spell the rival name exactly as \"JH\" (case sensitive) and confirm with END.\n"
+            "  * Update mission progress when each name is finalized.\n"
             "Respond with a single JSON object that conforms to PLANLET_SCHEMA.\n"
         ).format(side=summary.side, state=json.dumps(payload, indent=2, sort_keys=True))
 
@@ -187,6 +193,8 @@ class PlanletProposer:
 
         messages: List[Dict[str, Any]]
         messages = [{"role": "system", "content": PLANLET_SYSTEM_PROMPT}]
+        import logging
+        logging.getLogger("halt.prompt").info("HALT prompt: %s", user_prompt)
         model_name = getattr(getattr(client, "config", None), "model", "") or ""
         supports_image = any(token in model_name.lower() for token in ("gpt", "o1"))
         if frame_image is not None and supports_image:
@@ -270,6 +278,22 @@ class PlanletProposer:
 
         if not data.get("format"):
             data["format"] = str(getattr(summary, "format", None) or "overworld_generic")
+        timeout_steps = data.get("timeout_steps")
+        if not isinstance(timeout_steps, int) or timeout_steps <= 0:
+            kind = str(data.get("kind", "")).upper()
+            fmt = str(getattr(summary, "format", "") or "")
+            if kind == "NAVIGATE_TO" and fmt == "screen_local":
+                data["timeout_steps"] = 1200
+            elif kind == "MENU_SEQUENCE":
+                buttons = None
+                args = data.get("args")
+                if isinstance(args, Mapping) and isinstance(args.get("buttons"), list):
+                    buttons = args["buttons"]
+                if not isinstance(buttons, list):
+                    buttons = []
+                data["timeout_steps"] = max(120, 12 * max(1, len(buttons)))
+            else:
+                data["timeout_steps"] = 600
 
         return dict(data)
 
