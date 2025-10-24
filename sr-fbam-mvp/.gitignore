@@ -9,6 +9,12 @@ sr-fbam-mvp/data
 # Ignore raw evaluation outputs (reproducible)
 results/raw/
 runs/
+sr-fbam-mvp/runs/
+# Local run artifacts and logs
+sr-fbam-mvp/run_*.txt
+sr-fbam-mvp/run_*.log
+sr-fbam-mvp/run*.log
+patch.diff
 # Bytecode
 __pycache__/
 *.pyc
